@@ -10,6 +10,8 @@ Features:
 Same autonomy as OpenClaw!
 """
 
+__version__ = "0.0.1"
+
 import asyncio
 import subprocess
 import json
