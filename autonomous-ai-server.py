@@ -606,6 +606,7 @@ class DiscordBot(discord.Client):
         self.notification_channel: Optional[discord.TextChannel] = None
         self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
         self._channel_sessions: Dict[int, str] = {}  # channel_id -> session_id
+        self._channel_locks: Dict[int, asyncio.Lock] = {}  # channel_id -> lock
 
     async def on_ready(self):
         print(f"🤖 Discord 봇 로그인: {self.user}")
@@ -644,18 +645,21 @@ class DiscordBot(discord.Client):
                 return
 
         try:
-            # Get or create a persistent session for this channel
+            # Get or create a persistent session and lock for this channel
             channel_id = message.channel.id
             if channel_id not in self._channel_sessions:
                 self._channel_sessions[channel_id] = str(uuid.uuid4())
+            if channel_id not in self._channel_locks:
+                self._channel_locks[channel_id] = asyncio.Lock()
             session_id = self._channel_sessions[channel_id]
 
-            async with message.channel.typing():
-                response = await self.claude.execute(user_message, session_id=session_id)
+            async with self._channel_locks[channel_id]:
+                async with message.channel.typing():
+                    response = await self.claude.execute(user_message, session_id=session_id)
 
-            # Split long messages (Discord 2000 char limit)
-            for chunk in self._split_message(response):
-                await message.channel.send(chunk)
+                # Split long messages (Discord 2000 char limit)
+                for chunk in self._split_message(response):
+                    await message.channel.send(chunk)
         except Exception as e:
             await message.channel.send(f"오류가 발생했습니다: {e}")
 
