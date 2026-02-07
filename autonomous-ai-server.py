@@ -858,6 +858,7 @@ class StatusResponse(BaseModel):
     sessionId: str
     autonomousMode: bool
     lastCheck: Optional[str]
+    usage: Optional[Dict[str, Any]] = None
 
 
 class ThinkResponse(BaseModel):
@@ -886,6 +887,7 @@ async def status():
             if autonomous_engine.last_check
             else None
         ),
+        usage=claude.usage_tracker.get_status(),
     )
 
 
@@ -908,6 +910,8 @@ async def root():
         else "없음"
     )
 
+    usage = claude.usage_tracker.get_status()
+
     return f"""
     <html>
       <head>
@@ -915,6 +919,9 @@ async def root():
         <style>
           body {{ font-family: monospace; max-width: 800px; margin: 50px auto; }}
           .status {{ background: #e8f5e9; padding: 20px; border-radius: 5px; }}
+          .usage {{ background: #fff3e0; padding: 20px; border-radius: 5px; margin-top: 10px; }}
+          .usage-bar {{ background: #e0e0e0; border-radius: 4px; height: 20px; margin: 5px 0; }}
+          .usage-bar-fill {{ background: #ff6b6b; height: 100%; border-radius: 4px; }}
           button {{ padding: 10px 20px; font-size: 16px; margin: 5px; }}
         </style>
       </head>
@@ -925,6 +932,17 @@ async def root():
           <p><strong>Session:</strong> {CONFIG["session_id"]}</p>
           <p><strong>자율 모드:</strong> {'활성화' if CONFIG["autonomous_mode"] else '비활성화'}</p>
           <p><strong>마지막 체크:</strong> {last_check}</p>
+        </div>
+
+        <div class="usage">
+          <h3>📊 사용량</h3>
+          <p><strong>오늘:</strong> {usage["calls_today"]}/{usage["limits"]["per_day"]}</p>
+          <div class="usage-bar">
+            <div class="usage-bar-fill" style="width: {min(usage["calls_today"] * 100 // max(usage["limits"]["per_day"], 1), 100)}%"></div>
+          </div>
+          <p><strong>이번 시간:</strong> {usage["calls_this_hour"]}/{usage["limits"]["per_hour"]}</p>
+          <p><strong>전체 누적:</strong> {usage["total_calls_all_time"]}회</p>
+          <p><strong>상태:</strong> {'⏸️ 일시정지' if usage["paused"] else '✅ 활성'}</p>
         </div>
 
         <h2>수동 트리거</h2>
