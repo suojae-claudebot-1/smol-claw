@@ -36,6 +36,7 @@ CONFIG = {
     "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),  # Set via environment variable
 }
 
+
 # ============================================
 # Context Collector (AI에게 정보 제공)
 # ============================================
@@ -73,15 +74,12 @@ class ContextCollector:
                 ["git", "branch", "--show-current"],
                 cwd=git_dir,
                 encoding="utf-8",
-                timeout=5
+                timeout=5,
             ).strip()
 
             # Get git status
             status = subprocess.check_output(
-                ["git", "status", "--short"],
-                cwd=git_dir,
-                encoding="utf-8",
-                timeout=5
+                ["git", "status", "--short"], cwd=git_dir, encoding="utf-8", timeout=5
             ).strip()
 
             # Get last commit
@@ -89,7 +87,7 @@ class ContextCollector:
                 ["git", "log", "-1", "--oneline"],
                 cwd=git_dir,
                 encoding="utf-8",
-                timeout=5
+                timeout=5,
             ).strip()
 
             return {
@@ -127,20 +125,19 @@ class ClaudeExecutor:
     def __init__(self, session_id: str):
         self.session_id = session_id
 
-    async def execute(
-        self,
-        message: str,
-        system_prompt: Optional[str] = None
-    ) -> str:
+    async def execute(self, message: str, system_prompt: Optional[str] = None) -> str:
         """Execute Claude CLI command"""
         print(f"[{datetime.now().isoformat()}] 📤 Executing")
 
         args = [
             "claude",
             "--print",
-            "--session-id", self.session_id,
-            "--permission-mode", "dontAsk",
-            "--output-format", "text",
+            "--session-id",
+            self.session_id,
+            "--permission-mode",
+            "dontAsk",
+            "--output-format",
+            "text",
         ]
 
         if system_prompt:
@@ -156,7 +153,7 @@ class ClaudeExecutor:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 ),
-                timeout=60.0
+                timeout=60.0,
             )
 
             stdout, stderr = await result.communicate()
@@ -216,7 +213,9 @@ class AutonomousEngine:
         git_status = "없음"
         if context["git"]:
             git_status = f"브랜치 {context['git']['branch']}, "
-            git_status += "변경사항 있음" if context["git"]["hasChanges"] else "변경사항 없음"
+            git_status += (
+                "변경사항 있음" if context["git"]["hasChanges"] else "변경사항 없음"
+            )
 
         prompt = f"""현재 상황:
 
@@ -255,7 +254,7 @@ Git 상태: {git_status}
                 decision = {
                     "action": "none",
                     "message": response,
-                    "reasoning": "JSON 파싱 실패"
+                    "reasoning": "JSON 파싱 실패",
                 }
 
             print(f"\n✅ AI 결정: {decision}")
@@ -292,10 +291,14 @@ Git 상태: {git_status}
 
         # macOS notification (optional)
         try:
-            subprocess.run([
-                "osascript", "-e",
-                f'display notification "{message}" with title "AI 비서"'
-            ], check=False)
+            subprocess.run(
+                [
+                    "osascript",
+                    "-e",
+                    f'display notification "{message}" with title "AI 비서"',
+                ],
+                check=False,
+            )
         except Exception:
             pass
 
@@ -343,17 +346,21 @@ claude = ClaudeExecutor(CONFIG["session_id"])
 context_collector = ContextCollector()
 autonomous_engine = AutonomousEngine(claude, context_collector)
 
+
 # Request/Response models
 class AskRequest(BaseModel):
     message: str
 
+
 class AskResponse(BaseModel):
     response: str
+
 
 class StatusResponse(BaseModel):
     sessionId: str
     autonomousMode: bool
     lastCheck: Optional[str]
+
 
 class ThinkResponse(BaseModel):
     decision: Optional[Dict[str, Any]]
@@ -376,8 +383,11 @@ async def status():
     return StatusResponse(
         sessionId=CONFIG["session_id"],
         autonomousMode=CONFIG["autonomous_mode"],
-        lastCheck=autonomous_engine.last_check.isoformat()
-            if autonomous_engine.last_check else None
+        lastCheck=(
+            autonomous_engine.last_check.isoformat()
+            if autonomous_engine.last_check
+            else None
+        ),
     )
 
 
@@ -394,8 +404,11 @@ async def think():
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Web dashboard"""
-    last_check = autonomous_engine.last_check.isoformat() \
-        if autonomous_engine.last_check else "없음"
+    last_check = (
+        autonomous_engine.last_check.isoformat()
+        if autonomous_engine.last_check
+        else "없음"
+    )
 
     return f"""
     <html>
@@ -471,9 +484,4 @@ async def startup_event():
 # Main entry point
 # ============================================
 if __name__ == "__main__":
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=CONFIG["port"],
-        log_level="info"
-    )
+    uvicorn.run(app, host="0.0.0.0", port=CONFIG["port"], log_level="info")
