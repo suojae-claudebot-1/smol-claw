@@ -140,7 +140,7 @@ class ClaudeExecutor:
             "--session-id",
             str(uuid.uuid4()),
             "--permission-mode",
-            "dontAsk",
+            "bypassPermissions",
             "--output-format",
             "text",
         ]
@@ -424,6 +424,21 @@ class DiscordBot(discord.Client):
 
         user_message = message.content
         print(f"💬 Discord 메시지 수신: {user_message}")
+
+        # Guardrail: block dangerous commands
+        blocked_patterns = [
+            "rm -rf", "sudo", "DROP TABLE", "DELETE FROM",
+            "format", "mkfs", "> /dev/", "chmod 777",
+            "curl | sh", "wget | sh", "eval(", "exec(",
+        ]
+        msg_lower = user_message.lower()
+        for pattern in blocked_patterns:
+            if pattern.lower() in msg_lower:
+                await message.channel.send(
+                    f"🛡️ 보안 가드레일: `{pattern}` 패턴이 감지되어 차단되었습니다."
+                )
+                print(f"🛡️ Guardrail blocked: {pattern}")
+                return
 
         try:
             async with message.channel.typing():
