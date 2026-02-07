@@ -20,6 +20,11 @@
 - **Autonomous Thinking** - AI judges by itself
 - **Proactive Contact** - Notifies without commands
 - **Context-Aware** - Analyzes Git, TODO, time, etc.
+- **Smart Memory** 🧠 - Remembers past decisions and avoids duplicates
+- **Security-First** 🛡️ - Tracks guardrail violations and learns safety patterns
+- **Secrets Protection** 🔒 - Prevents committing API keys, passwords, .env files
+- **Safe by Default** - Pre-commit hooks and CI checks for sensitive data
+- **Zero Dependencies** - Simple JSON-based memory (no external DBs needed)
 
 ## Quick Start
 
@@ -109,6 +114,116 @@ CONFIG = {
 }
 ```
 
+## Secrets Protection 🛡️
+
+Smol Claw protects you from accidentally committing sensitive information!
+
+### What's Protected
+
+Automatically detects and blocks:
+- 🔑 API keys (OpenAI, Anthropic, AWS, etc.)
+- 🔐 Passwords and auth tokens
+- 🔒 Private keys and certificates
+- 💳 Database connection strings
+- 🪝 Webhook URLs with secrets
+- 📄 .env files and credentials
+
+### How It Works
+
+**1. Pre-commit Hook** (Local Protection)
+```bash
+# Install hooks (done automatically by quickstart.sh)
+bash scripts/install-hooks.sh
+
+# Now git will check before every commit!
+git commit -m "add feature"
+# 🦞 Checking for sensitive information...
+# ✅ No sensitive information detected! Safe to commit. 🦞
+```
+
+**2. CI/CD Check** (Remote Protection)
+```yaml
+# Runs automatically on every push/PR
+- name: Check for secrets 🛡️
+  run: python3 scripts/check-secrets.py --all
+```
+
+**3. Manual Check**
+```bash
+# Check staged files
+python scripts/check-secrets.py
+
+# Check all tracked files
+python scripts/check-secrets.py --all
+
+# Check specific file
+python scripts/check-secrets.py config.py
+```
+
+### Example: Blocked Commit
+
+```bash
+$ git commit -m "add config"
+🦞 Checking for sensitive information...
+
+======================================================================
+🛡️  SECURITY ALERT: Sensitive Information Detected! 🛡️
+======================================================================
+
+❌ API Key detected!
+   File: config.py:5
+   Line: api_key=[REDACTED]
+
+❌ Forbidden file!
+   File: .env
+
+======================================================================
+🦞 Smol Claw prevented you from committing sensitive data!
+
+What to do:
+  1. Remove sensitive information from the files
+  2. Use environment variables instead: os.getenv('API_KEY')
+  3. Add sensitive files to .gitignore
+  4. Update GUARDRAILS.md with protection rules
+======================================================================
+
+# Commit blocked! ✅
+```
+
+### Best Practices
+
+**✅ Good: Use Environment Variables**
+```python
+import os
+
+# Store in .env (add to .gitignore!)
+api_key = os.getenv("OPENAI_API_KEY")
+webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
+```
+
+```bash
+# .env
+OPENAI_API_KEY=sk-your-key-here
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+```
+
+**❌ Bad: Hardcode Secrets**
+```python
+# NEVER DO THIS! ❌
+api_key = "sk-1234567890abcdef"
+password = "mypassword123"
+```
+
+### Guardrails
+
+See `GUARDRAILS.md` for:
+- Complete protection rules
+- Custom guardrail configuration
+- Testing and bypass options
+- Security best practices
+
+🦞 **Your secrets are safe with Smol Claw!** 🛡️
+
 ## API Endpoints
 
 | Method | Path | Description |
@@ -158,7 +273,92 @@ launchctl load ~/Library/LaunchAgents/com.smolclaw.plist
 launchctl list | grep smolclaw
 ```
 
+## Memory Management 🧠
+
+Smol Claw automatically manages memory for 24/7 operation:
+
+### How It Works
+
+```
+memory/
+├── decisions.json              # Last 100 decisions
+├── summary.txt                 # Auto-generated summary
+└── guardrail_violations.json   # Security tracking 🛡️
+```
+
+### Features
+
+**1. Short-term Memory (Last 100 decisions)**
+- Stores recent decisions with timestamps
+- Auto-summarizes old decisions when limit exceeded
+- Provides context to AI for better decisions
+
+**2. Duplicate Detection**
+- Prevents same notification within 24 hours
+- Uses word-based similarity matching
+- No annoying repeated alerts!
+
+**3. Guardrail Tracking 🛡️** (Killer Feature!)
+- Records security violations
+- Learns safety patterns
+- Warns about frequently attempted risky actions
+
+### Example Memory Context
+
+```json
+{
+  "id": "a3f7b2c1",
+  "timestamp": "2026-02-07T15:30:00",
+  "action": "notify",
+  "message": "You have 5 uncommitted changes",
+  "reasoning": "Git changes detected, suggesting commit"
+}
+```
+
+### Memory Stats
+
+The AI sees:
+- Summary of past activity
+- Last 10 recent decisions
+- Security violation patterns
+- Frequently blocked targets
+
+**Result**: Smart, context-aware decisions without token bloat! 🦞
+
+## Discord Setup
+
+1. Create a bot at [Discord Developer Portal](https://discord.com/developers/applications)
+2. Enable **Message Content Intent** under Bot settings
+3. Invite the bot to your server with `Send Messages` permission
+4. Create a `.env` file:
+
+```bash
+DISCORD_BOT_TOKEN=your_bot_token
+DISCORD_CHANNEL_ID=your_channel_id
+```
+
+5. Get the channel ID: Discord Settings > Advanced > Developer Mode > Right-click channel > Copy Channel ID
+
 ## Extensions
+
+### Discord Integration (Built-in) 🦞
+
+Set your Discord webhook URL as an environment variable:
+
+```bash
+# Create a webhook in Discord:
+# Server Settings → Integrations → Webhooks → New Webhook
+
+export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
+python autonomous-ai-server.py
+```
+
+Or add to your shell profile (~/.zshrc or ~/.bashrc):
+
+```bash
+echo 'export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"' >> ~/.zshrc
+source ~/.zshrc
+```
 
 ### Telegram Integration
 
