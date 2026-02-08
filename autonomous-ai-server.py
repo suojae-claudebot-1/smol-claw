@@ -351,6 +351,7 @@ class ClaudeExecutor:
         async def _run(cmd_args):
             proc = await asyncio.create_subprocess_exec(
                 *cmd_args,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -360,20 +361,11 @@ class ClaudeExecutor:
         try:
             proc, stdout, stderr = await asyncio.wait_for(_run(args), timeout=120.0)
 
-            # Retry once with new session if "already in use"
-            if proc.returncode != 0:
-                err_msg = stderr.decode()
-                if "already in use" in err_msg:
-                    print(f"⚠️ Session busy, retrying with new session...")
-                    await asyncio.sleep(2)
-                    new_sid = str(uuid.uuid4())
-                    retry_args = [
-                        a if a != args[args.index("--session-id") + 1] else new_sid
-                        for a in args
-                    ]
-                    proc, stdout, stderr = await asyncio.wait_for(
-                        _run(retry_args), timeout=120.0
-                    )
+            # Retry once after delay if session is still locked
+            if proc.returncode != 0 and "already in use" in stderr.decode():
+                print("⚠️ Session busy, retrying in 2s...")
+                await asyncio.sleep(2)
+                proc, stdout, stderr = await asyncio.wait_for(_run(args), timeout=120.0)
 
             if proc.returncode == 0:
                 print(f"[{datetime.now().isoformat()}] 📥 Completed")
@@ -619,8 +611,8 @@ class DiscordBot(discord.Client):
         self.claude = claude
         self.notification_channel: Optional[discord.TextChannel] = None
         self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
-        self._channel_sessions: Dict[int, str] = {}  # channel_id -> session_id
-        self._channel_locks: Dict[int, asyncio.Lock] = {}  # channel_id -> lock
+        self._channel_history: Dict[int, List[Dict[str, str]]] = {}  # channel_id -> conversation
+        self._max_history = 10
 
     async def on_ready(self):
         print(f"🤖 Discord 봇 로그인: {self.user}")
@@ -659,25 +651,39 @@ class DiscordBot(discord.Client):
                 return
 
         try:
-            # Get or create a persistent session and lock for this channel
             channel_id = message.channel.id
-            if channel_id not in self._channel_sessions:
-                self._channel_sessions[channel_id] = str(uuid.uuid4())
-            if channel_id not in self._channel_locks:
-                self._channel_locks[channel_id] = asyncio.Lock()
-            session_id = self._channel_sessions[channel_id]
 
-            async with self._channel_locks[channel_id]:
-                async with message.channel.typing():
-                    try:
-                        response = await self.claude.execute(user_message, session_id=session_id)
-                    except UsageLimitExceeded:
-                        await asyncio.sleep(CONFIG["usage_limits"]["min_call_interval_seconds"])
-                        response = await self.claude.execute(user_message, session_id=session_id)
+            # Build context from conversation history
+            if channel_id not in self._channel_history:
+                self._channel_history[channel_id] = []
+            history = self._channel_history[channel_id]
 
-                # Split long messages (Discord 2000 char limit)
-                for chunk in self._split_message(response):
-                    await message.channel.send(chunk)
+            context = None
+            if history:
+                lines = [f"{h['role']}: {h['text']}" for h in history[-self._max_history:]]
+                context = "이전 대화:\n" + "\n".join(lines) + "\n\n위 대화를 기억하고 자연스럽게 이어서 대답하세요."
+
+            async with message.channel.typing():
+                try:
+                    response = await self.claude.execute(
+                        user_message, system_prompt=context
+                    )
+                except UsageLimitExceeded:
+                    await asyncio.sleep(CONFIG["usage_limits"]["min_call_interval_seconds"])
+                    response = await self.claude.execute(
+                        user_message, system_prompt=context
+                    )
+
+            # Save to history
+            history.append({"role": "user", "text": user_message})
+            history.append({"role": "assistant", "text": response[:200]})
+            # Trim history
+            if len(history) > self._max_history * 2:
+                self._channel_history[channel_id] = history[-self._max_history * 2:]
+
+            # Split long messages (Discord 2000 char limit)
+            for chunk in self._split_message(response):
+                await message.channel.send(chunk)
         except Exception as e:
             await message.channel.send(f"오류가 발생했습니다: {e}")
 
@@ -1151,15 +1157,6 @@ async def root():
 async def autonomous_loop():
     """Queue-based event consumer — blocks until events arrive, zero polling"""
     print("⏰ 이벤트 기반 자율 루프 시작 (queue consumer)")
-
-    # Initial delay
-    await asyncio.sleep(5)
-
-    # Initial run
-    try:
-        await autonomous_engine.think(events=[{"type": "startup", "detail": "Server started"}])
-    except Exception as e:
-        print(f"❌ Error in initial run: {e}")
 
     # Event-driven loop — blocks on queue.get(), wakes only on real events
     while True:
