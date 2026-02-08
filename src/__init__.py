@@ -9,6 +9,8 @@ from src.memory import SimpleMemory, GuardrailMemory
 from src.discord_bot import DiscordBot
 from src.webhook import format_github_event, send_direct_discord_notification
 from src.engine import AutonomousEngine
+from src.x_client import XClient, XPostResult
+from src.threads_client import ThreadsClient, ThreadsPostResult
 from src.app import app
 
 __all__ = [
@@ -25,5 +27,9 @@ __all__ = [
     "format_github_event",
     "send_direct_discord_notification",
     "AutonomousEngine",
+    "XClient",
+    "XPostResult",
+    "ThreadsClient",
+    "ThreadsPostResult",
     "app",
 ]
