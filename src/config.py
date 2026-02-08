@@ -16,8 +16,6 @@ CONFIG = {
     "check_interval": 30 * 60,  # 30 minutes in seconds
     "autonomous_mode": True,
     "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),  # Set via environment variable
-    "github_repo": os.getenv("GITHUB_REPO", ""),  # e.g. "suojae/smol-claw"
-    "github_webhook_secret": os.getenv("GITHUB_WEBHOOK_SECRET", ""),
     "usage_limits": {
         "max_calls_per_minute": 5,
         "max_calls_per_hour": 20,
