@@ -18,6 +18,14 @@ CONFIG = {
     "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),  # Set via environment variable
     "github_repo": os.getenv("GITHUB_REPO", ""),  # e.g. "suojae/smol-claw"
     "github_webhook_secret": os.getenv("GITHUB_WEBHOOK_SECRET", ""),
+    # X (Twitter)
+    "x_consumer_key": os.getenv("X_CONSUMER_KEY", ""),
+    "x_consumer_secret": os.getenv("X_CONSUMER_SECRET", ""),
+    "x_access_token": os.getenv("X_ACCESS_TOKEN", ""),
+    "x_access_token_secret": os.getenv("X_ACCESS_TOKEN_SECRET", ""),
+    # Threads (Meta)
+    "threads_user_id": os.getenv("THREADS_USER_ID", ""),
+    "threads_access_token": os.getenv("THREADS_ACCESS_TOKEN", ""),
     "usage_limits": {
         "max_calls_per_minute": 5,
         "max_calls_per_hour": 20,
