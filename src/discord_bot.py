@@ -4,11 +4,12 @@ import asyncio
 import json
 import os
 import uuid
+import warnings
 from typing import Optional, Dict, List
 
 import discord
 
-from src.executor import ClaudeExecutor
+from src.executor import AIExecutor
 from src.usage import UsageLimitExceeded
 from src.config import CONFIG, MODEL_ALIASES, DEFAULT_MODEL
 from src.persona import BOT_PERSONA
@@ -26,11 +27,29 @@ SENTIMENT_SYSTEM_PROMPT = (
 class DiscordBot(discord.Client):
     """Discord bot for bidirectional communication with users"""
 
-    def __init__(self, claude: ClaudeExecutor, hormones=None):
+    def __init__(
+        self,
+        executor: Optional[AIExecutor] = None,
+        hormones=None,
+        claude: Optional[AIExecutor] = None,  # backward compatibility
+    ):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
-        self.claude = claude
+
+        if executor is not None and claude is not None:
+            raise ValueError("pass either executor or claude, not both")
+        if executor is None and claude is not None:
+            warnings.warn(
+                "`claude` argument is deprecated; use `executor` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            executor = claude
+        if executor is None:
+            raise ValueError("executor is required")
+
+        self.executor = executor
         self.hormones = hormones
         self.notification_channel: Optional[discord.TextChannel] = None
         self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
@@ -122,13 +141,13 @@ class DiscordBot(discord.Client):
 
             async with message.channel.typing():
                 try:
-                    response = await self.claude.execute(
+                    response = await self.executor.execute(
                         user_message, system_prompt=context,
                         model=MODEL_ALIASES[effective_model],
                     )
                 except UsageLimitExceeded:
                     await asyncio.sleep(CONFIG["usage_limits"]["min_call_interval_seconds"])
-                    response = await self.claude.execute(
+                    response = await self.executor.execute(
                         user_message, system_prompt=context,
                         model=MODEL_ALIASES[effective_model],
                     )
@@ -158,7 +177,7 @@ class DiscordBot(discord.Client):
             return
 
         try:
-            raw = await self.claude.execute(
+            raw = await self.executor.execute(
                 user_message,
                 system_prompt=SENTIMENT_SYSTEM_PROMPT,
                 model=MODEL_ALIASES["haiku"],
@@ -184,7 +203,7 @@ class DiscordBot(discord.Client):
             print(f"Sentiment analysis skipped: {e}")
 
     async def _handle_model_command(self, message: discord.Message, content: str):
-        """Handle !model command for switching Claude models."""
+        """Handle !model command for switching available models."""
         parts = content.split()
         if len(parts) == 1:
             model_id = MODEL_ALIASES[self._current_model]
