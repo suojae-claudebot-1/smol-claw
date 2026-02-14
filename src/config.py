@@ -1,19 +1,22 @@
 """Configuration and shared state."""
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"
 
-import asyncio
 import os
+import sys
 import uuid
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Redirect print to stderr to prevent stdout pollution in MCP stdio mode
+_stderr_print = lambda *a, **kw: print(*a, **kw, file=sys.stderr)
+
 SUPPORTED_AI_PROVIDERS = ("claude", "codex")
 AI_PROVIDER = os.getenv("AI_PROVIDER", "claude").strip().lower()
 if AI_PROVIDER not in SUPPORTED_AI_PROVIDERS:
-    print(f"Unsupported AI_PROVIDER={AI_PROVIDER!r}, falling back to 'claude'")
+    _stderr_print(f"Unsupported AI_PROVIDER={AI_PROVIDER!r}, falling back to 'claude'")
     AI_PROVIDER = "claude"
 
 MODEL_ALIASES_BY_PROVIDER = {
@@ -37,7 +40,7 @@ MODEL_ALIASES = MODEL_ALIASES_BY_PROVIDER[AI_PROVIDER]
 DEFAULT_MODEL = os.getenv("AI_DEFAULT_MODEL", "sonnet").strip().lower()
 if DEFAULT_MODEL not in MODEL_ALIASES:
     fallback = "sonnet" if "sonnet" in MODEL_ALIASES else next(iter(MODEL_ALIASES))
-    print(
+    _stderr_print(
         f"Unsupported AI_DEFAULT_MODEL={DEFAULT_MODEL!r} for provider={AI_PROVIDER!r}, "
         f"falling back to {fallback!r}"
     )
@@ -49,7 +52,7 @@ CONFIG = {
     "ai_provider": AI_PROVIDER,
     "check_interval": 30 * 60,  # 30 minutes in seconds
     "autonomous_mode": True,
-    "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),  # Set via environment variable
+    "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),
     # X (Twitter)
     "x_consumer_key": os.getenv("X_CONSUMER_KEY", ""),
     "x_consumer_secret": os.getenv("X_CONSUMER_SECRET", ""),
@@ -67,6 +70,3 @@ CONFIG = {
         "paused": False,
     },
 }
-
-# Global event queue — re-created in startup_event() to match uvicorn's loop
-event_queue: asyncio.Queue = asyncio.Queue()
