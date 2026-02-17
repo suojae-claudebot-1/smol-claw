@@ -86,6 +86,8 @@ class BaseMarketingBot(discord.Client):
         self._max_bot_chain: int = 5  # max bot-to-bot replies before stopping
         self._alarm_scheduler = AlarmScheduler(bot_name=bot_name)
         self._alarm_loop_task: Optional[asyncio.Task] = None
+        self._alarm_fire_tasks: set = set()  # track in-flight alarm tasks for cleanup
+        self._in_flight_alarms: set = set()  # alarm IDs currently executing (prevent duplicate fire)
 
     def _is_role_mentioned(self, message: discord.Message) -> bool:
         """Check if the bot's role is mentioned (Discord converts @BotName to role mention)."""
@@ -351,19 +353,19 @@ class BaseMarketingBot(discord.Client):
         if not mapping:
             return f"[{self.bot_name}] 알 수 없는 액션: {action_type}"
 
-        # CR #3: Reject empty action body
-        if not body:
-            return f"[{self.bot_name}] 액션 본문이 비어있음. ({action_type})"
-
         platform, action_kind = mapping
 
-        # Alarm actions
+        # Alarm actions (handle before empty body guard — they have their own validation)
         if action_type == "SET_ALARM":
             if not message:
                 return f"[{self.bot_name}] 알람 등록 실패: 메시지 컨텍스트 없음"
             return await self._execute_set_alarm(body, message)
         if action_type == "CANCEL_ALARM":
             return await self._execute_cancel_alarm(body)
+
+        # CR #3: Reject empty action body (after alarm actions which have own validation)
+        if not body:
+            return f"[{self.bot_name}] 액션 본문이 비어있음. ({action_type})"
 
         # SEARCH_NEWS — execute immediately, no approval needed
         if action_type == "SEARCH_NEWS":
@@ -529,27 +531,33 @@ class BaseMarketingBot(discord.Client):
             try:
                 due = self._alarm_scheduler.get_due_alarms(datetime.now(timezone.utc))
                 for alarm in due:
-                    asyncio.create_task(self._fire_alarm(alarm))
+                    if alarm.alarm_id in self._in_flight_alarms:
+                        continue
+                    task = asyncio.create_task(self._fire_alarm(alarm))
+                    self._alarm_fire_tasks.add(task)
+                    task.add_done_callback(self._alarm_fire_tasks.discard)
             except Exception as e:
                 _log(f"[{self.bot_name}] alarm loop error: {e}")
 
     async def _fire_alarm(self, alarm: AlarmEntry):
         """Execute alarm: run LLM with prompt → send result to channel."""
-        channel = self.get_channel(alarm.channel_id)
-        if not channel:
-            _log(f"[{self.bot_name}] alarm {alarm.alarm_id}: channel {alarm.channel_id} not found")
-            self._alarm_scheduler.mark_run(alarm.alarm_id, datetime.now(timezone.utc))
-            return
+        self._in_flight_alarms.add(alarm.alarm_id)
+        # Mark run BEFORE execution to prevent duplicate fire on slow LLM calls
+        self._alarm_scheduler.mark_run(alarm.alarm_id, datetime.now(timezone.utc))
         try:
-            if not self.executor:
-                self._alarm_scheduler.mark_run(alarm.alarm_id, datetime.now(timezone.utc))
+            channel = self.get_channel(alarm.channel_id)
+            if not channel:
+                _log(f"[{self.bot_name}] alarm {alarm.alarm_id}: channel {alarm.channel_id} not found")
                 return
+            if not self.executor:
+                return
+            # Sanitize prompt: strip any injected action blocks
+            safe_prompt = _ACTION_RE.sub("", alarm.prompt).strip()
             response = await self.executor.execute(
-                alarm.prompt,
+                safe_prompt,
                 system_prompt=self.persona,
                 model=MODEL_ALIASES[self._current_model],
             )
-            self._alarm_scheduler.mark_run(alarm.alarm_id, datetime.now(timezone.utc))
             # Security: strip action blocks from alarm-triggered responses
             response = _ACTION_RE.sub("", response).strip()
             prefix = f"[{self.bot_name}] 알람 ({alarm.alarm_id})\n"
@@ -557,7 +565,8 @@ class BaseMarketingBot(discord.Client):
                 await channel.send(chunk)
         except Exception as e:
             _log(f"[{self.bot_name}] alarm {alarm.alarm_id} failed: {e}")
-            self._alarm_scheduler.mark_run(alarm.alarm_id, datetime.now(timezone.utc))
+        finally:
+            self._in_flight_alarms.discard(alarm.alarm_id)
 
     async def _handle_alarms(self, message: discord.Message):
         """Handle !alarms command with subcommands: list, cancel <id>, cancel all."""
@@ -655,12 +664,22 @@ class BaseMarketingBot(discord.Client):
 
     @staticmethod
     def _parse_alarm_body(body: str) -> Dict[str, str]:
-        """Parse key: value lines from action body."""
+        """Parse key: value lines from action body.
+
+        Lines without a colon are appended to the previous key's value,
+        supporting multiline prompt fields.
+        """
         fields: Dict[str, str] = {}
+        last_key: Optional[str] = None
         for line in body.strip().splitlines():
             if ":" in line:
                 key, _, value = line.partition(":")
-                fields[key.strip().lower()] = value.strip()
+                key = key.strip().lower()
+                fields[key] = value.strip()
+                last_key = key
+            elif last_key is not None:
+                # Continuation line — append to previous key
+                fields[last_key] += "\n" + line
         return fields
 
     async def send_to_team(self, text: str):

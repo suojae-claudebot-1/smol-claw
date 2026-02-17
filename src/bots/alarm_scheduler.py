@@ -1,8 +1,10 @@
 """Alarm scheduler — dynamic alarm registration, persistence, and due-checking."""
 
 import json
+import os
 import re
 import sys
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -227,13 +229,26 @@ class AlarmScheduler:
             _log(f"[AlarmScheduler:{self._bot_name}] load failed: {e}")
 
     def _save(self):
-        """Persist alarms to JSON file."""
+        """Persist alarms to JSON file (atomic write via tmp + replace)."""
         try:
             self._storage_path.parent.mkdir(parents=True, exist_ok=True)
             data = [asdict(a) for a in self._alarms.values()]
-            self._storage_path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            content = json.dumps(data, ensure_ascii=False, indent=2)
+            # Atomic write: write to temp file in same directory, then replace
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self._storage_path.parent),
+                suffix=".tmp",
             )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp_path, str(self._storage_path))
+            except BaseException:
+                # Clean up temp file on failure
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except Exception as e:
             _log(f"[AlarmScheduler:{self._bot_name}] save failed: {e}")
