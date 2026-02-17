@@ -80,7 +80,10 @@ class BaseMarketingBot(discord.Client):
         self._max_history = 10
         self._current_model: str = DEFAULT_MODEL
         self._active: bool = True
+        self._rehired: bool = False  # set by HR on rehire → triggers onboarding context
         self._active_tasks: Dict[int, asyncio.Task] = {}  # channel_id → running Task
+        self._bot_chain_count: Dict[int, int] = {}  # channel_id → consecutive bot reply count
+        self._max_bot_chain: int = 5  # max bot-to-bot replies before stopping
         self._alarm_scheduler = AlarmScheduler(bot_name=bot_name)
         self._alarm_loop_task: Optional[asyncio.Task] = None
 
@@ -178,10 +181,18 @@ class BaseMarketingBot(discord.Client):
         if message.author.bot:
             # Bot messages: only respond if mentioned in team channel
             if is_team_channel and is_mentioned:
+                chain = self._bot_chain_count.get(message.channel.id, 0)
+                if chain >= self._max_bot_chain:
+                    _log(f"[{self.bot_name}] bot chain limit reached ({chain}/{self._max_bot_chain}), ignoring")
+                    return
+                self._bot_chain_count[message.channel.id] = chain + 1
                 await self._respond(message)
             return
 
-        # User messages
+        # User messages — reset bot chain counter
+        if is_team_channel:
+            self._bot_chain_count[message.channel.id] = 0
+
         if is_own_channel:
             # 1:1 channel — always respond
             await self._respond(message)
@@ -208,6 +219,7 @@ class BaseMarketingBot(discord.Client):
         try:
             channel_id = message.channel.id
             is_team_channel = channel_id in self._team_channel_ids
+            is_own_channel = channel_id == self.own_channel_id
 
             # Build context from conversation history (LRU eviction)
             if channel_id in self._channel_history:
@@ -221,6 +233,15 @@ class BaseMarketingBot(discord.Client):
             history = self._channel_history[channel_id]
 
             parts = [self.persona]
+
+            # Onboarding context after rehire (fire → hire cycle)
+            if self._rehired:
+                parts.append(
+                    "[시스템 알림] 너는 방금 해고(컨텍스트 초기화) 후 재채용되었음. "
+                    "이전 대화 기록은 전부 삭제된 상태임. "
+                    "새로 온보딩한다고 생각하고, 팀에 합류 인사 후 업무에 바로 복귀할 것."
+                )
+                self._rehired = False
 
             if history:
                 lines = [f"{h['role']}: {h['text']}" for h in history[-self._max_history:]]
@@ -279,15 +300,15 @@ class BaseMarketingBot(discord.Client):
                 for chunk in self._split_message(plain_text):
                     await message.channel.send(chunk)
 
-            # CR #1: Only execute SNS actions in team channel (not 1:1 user channels)
-            # Alarm actions (SET_ALARM, CANCEL_ALARM) are allowed in 1:1 channels
+            # Actions allowed in team channel and bot's own 1:1 channel
+            # Alarm actions (SET_ALARM, CANCEL_ALARM) are allowed everywhere
             _ALARM_ACTIONS = {"SET_ALARM", "CANCEL_ALARM"}
-            if not is_team_channel:
+            if not is_team_channel and not is_own_channel:
                 alarm_actions = [(t, b) for t, b in actions if t in _ALARM_ACTIONS]
                 non_alarm_actions = [(t, b) for t, b in actions if t not in _ALARM_ACTIONS]
                 if non_alarm_actions:
                     await message.channel.send(
-                        f"[{self.bot_name}] SNS 액션은 팀 채널에서만 실행 가능함."
+                        f"[{self.bot_name}] 액션은 팀 채널 또는 1:1 채널에서만 실행 가능함."
                     )
                 actions = alarm_actions
                 if not actions:
@@ -412,7 +433,37 @@ class BaseMarketingBot(discord.Client):
             return f"[{self.bot_name}] 뉴스 검색 에러: {e}"
 
     async def _handle_cancel(self, message: discord.Message):
-        """Cancel the active LLM task for this channel, if any."""
+        """Cancel active LLM tasks.
+
+        `!cancel`     — cancel this bot's task for the current channel.
+        `!cancel all` — cancel ALL bots' active tasks across all channels.
+        """
+        args = message.content.strip().split()
+        cancel_all = len(args) >= 2 and args[1].lower() == "all"
+
+        if cancel_all:
+            is_team = message.channel.id in self._team_channel_ids
+            if is_team:
+                # Team channel: every bot receives !cancel all independently
+                # → each bot cancels its own tasks only (avoids duplicate cancellation)
+                count = self._cancel_own_tasks()
+                if count:
+                    await message.channel.send(f"[{self.bot_name}] {count}건 취소됨.")
+            else:
+                # 1:1 channel: only this bot receives → iterate registry for full cancel
+                registry: Dict[str, "BaseMarketingBot"] = getattr(self, "bot_registry", None) or {}
+                all_bots = list(registry.values()) if registry else [self]
+                if self not in all_bots:
+                    all_bots.append(self)
+                total = 0
+                for bot in all_bots:
+                    total += bot._cancel_own_tasks()
+                if total:
+                    await message.channel.send(f"[{self.bot_name}] 전체 취소: {total}건의 작업이 중단됨.")
+                else:
+                    await message.channel.send(f"[{self.bot_name}] 취소할 작업이 없음.")
+            return
+
         channel_id = message.channel.id
         task = self._active_tasks.get(channel_id)
         if task and not task.done():
@@ -423,6 +474,15 @@ class BaseMarketingBot(discord.Client):
             # In 1:1 channels, inform the user.
             if channel_id == self.own_channel_id:
                 await message.channel.send(f"[{self.bot_name}] 취소할 작업이 없음.")
+
+    def _cancel_own_tasks(self) -> int:
+        """Cancel all of this bot's active tasks across all channels. Returns count."""
+        cancelled = 0
+        for ch_id, task in list(self._active_tasks.items()):
+            if task and not task.done():
+                task.cancel()
+                cancelled += 1
+        return cancelled
 
     async def _handle_clear(self, message: discord.Message):
         """Clear conversation history. `!clear` = current channel, `!clear all` = all."""
