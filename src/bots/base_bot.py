@@ -4,10 +4,12 @@ import asyncio
 import re
 import sys
 from collections import OrderedDict
+from datetime import datetime, timezone
 from typing import Any, Optional, Dict, List
 
 import discord
 
+from src.bots.alarm_scheduler import AlarmEntry, AlarmScheduler
 from src.config import CONFIG, MODEL_ALIASES, DEFAULT_MODEL
 from src.executor import AIExecutor
 
@@ -29,6 +31,8 @@ _ACTION_MAP: Dict[str, tuple] = {
     "POST_INSTAGRAM": ("instagram", "post"),
     "POST_X": ("x", "post"),
     "SEARCH_NEWS": ("news", "search"),
+    "SET_ALARM": ("alarm", "set"),
+    "CANCEL_ALARM": ("alarm", "cancel"),
 }
 
 # Max actions per single LLM response (spam prevention)
@@ -80,6 +84,10 @@ class BaseMarketingBot(discord.Client):
         self._active_tasks: Dict[int, asyncio.Task] = {}  # channel_id → running Task
         self._bot_chain_count: Dict[int, int] = {}  # channel_id → consecutive bot reply count
         self._max_bot_chain: int = 5  # max bot-to-bot replies before stopping
+        self._alarm_scheduler = AlarmScheduler(bot_name=bot_name)
+        self._alarm_loop_task: Optional[asyncio.Task] = None
+        self._alarm_fire_tasks: set = set()  # track in-flight alarm tasks for cleanup
+        self._in_flight_alarms: set = set()  # alarm IDs currently executing (prevent duplicate fire)
 
     def _is_role_mentioned(self, message: discord.Message) -> bool:
         """Check if the bot's role is mentioned (Discord converts @BotName to role mention)."""
@@ -104,6 +112,8 @@ class BaseMarketingBot(discord.Client):
 
     async def on_ready(self):
         _log(f"[{self.bot_name}] logged in as {self.user}")
+        if not self._alarm_loop_task or self._alarm_loop_task.done():
+            self._alarm_loop_task = asyncio.create_task(self._alarm_loop())
 
     def clear_history(self):
         """대화 히스토리 전체 초기화."""
@@ -147,6 +157,11 @@ class BaseMarketingBot(discord.Client):
                     return
 
                 return
+
+            if cmd == "!alarms":
+                if is_own_channel or (is_team_channel and is_mentioned):
+                    await self._handle_alarms(message)
+                    return
 
             if cmd == "!help":
                 # 1:1 channel — always handle
@@ -288,12 +303,18 @@ class BaseMarketingBot(discord.Client):
                     await message.channel.send(chunk)
 
             # Actions allowed in team channel and bot's own 1:1 channel
+            # Alarm actions (SET_ALARM, CANCEL_ALARM) are allowed everywhere
+            _ALARM_ACTIONS = {"SET_ALARM", "CANCEL_ALARM"}
             if not is_team_channel and not is_own_channel:
-                if actions:
+                alarm_actions = [(t, b) for t, b in actions if t in _ALARM_ACTIONS]
+                non_alarm_actions = [(t, b) for t, b in actions if t not in _ALARM_ACTIONS]
+                if non_alarm_actions:
                     await message.channel.send(
                         f"[{self.bot_name}] 액션은 팀 채널 또는 1:1 채널에서만 실행 가능함."
                     )
-                return
+                actions = alarm_actions
+                if not actions:
+                    return
 
             # CR #2: Limit actions per message to prevent spam
             if len(actions) > _MAX_ACTIONS_PER_MESSAGE:
@@ -305,7 +326,7 @@ class BaseMarketingBot(discord.Client):
             # Execute actions with lock (CR #5: concurrency control)
             async with self._action_lock:
                 for action_type, action_body in actions:
-                    result = await self._execute_action(action_type, action_body.strip())
+                    result = await self._execute_action(action_type, action_body.strip(), message=message)
                     if result:
                         await message.channel.send(result)
 
@@ -326,17 +347,25 @@ class BaseMarketingBot(discord.Client):
                 caption_lines.append(line)
         return "\n".join(caption_lines).strip(), image_url
 
-    async def _execute_action(self, action_type: str, body: str) -> str:
+    async def _execute_action(self, action_type: str, body: str, message: discord.Message = None) -> str:
         """Execute an action block. Respects the approval system for POST actions."""
         mapping = _ACTION_MAP.get(action_type)
         if not mapping:
             return f"[{self.bot_name}] 알 수 없는 액션: {action_type}"
 
-        # CR #3: Reject empty action body
+        platform, action_kind = mapping
+
+        # Alarm actions (handle before empty body guard — they have their own validation)
+        if action_type == "SET_ALARM":
+            if not message:
+                return f"[{self.bot_name}] 알람 등록 실패: 메시지 컨텍스트 없음"
+            return await self._execute_set_alarm(body, message)
+        if action_type == "CANCEL_ALARM":
+            return await self._execute_cancel_alarm(body)
+
+        # CR #3: Reject empty action body (after alarm actions which have own validation)
         if not body:
             return f"[{self.bot_name}] 액션 본문이 비어있음. ({action_type})"
-
-        platform, action_kind = mapping
 
         # SEARCH_NEWS — execute immediately, no approval needed
         if action_type == "SEARCH_NEWS":
@@ -486,11 +515,172 @@ class BaseMarketingBot(discord.Client):
             "`!cancel @봇이름` — 특정 봇의 진행 중인 응답 취소",
             "`!cancel all` — 모든 봇의 진행 중인 응답 취소",
             "`!cancel` — (1:1 채널) 진행 중인 응답 취소",
+            "`!alarms` — 등록된 알람 목록 조회",
+            "`!alarms cancel <ID>` — 특정 알람 취소",
+            "`!alarms cancel all` — 전체 알람 취소",
             "`!clear` — 현재 채널 대화 기록 초기화",
             "`!clear all` — 전체 채널 대화 기록 초기화",
             "`!help` — 이 명령어 목록 표시",
         ]
         await message.channel.send("\n".join(lines))
+
+    async def _alarm_loop(self):
+        """Check alarms every 60 seconds and fire due ones."""
+        while not self.is_closed():
+            await asyncio.sleep(60)
+            try:
+                due = self._alarm_scheduler.get_due_alarms(datetime.now(timezone.utc))
+                for alarm in due:
+                    if alarm.alarm_id in self._in_flight_alarms:
+                        continue
+                    task = asyncio.create_task(self._fire_alarm(alarm))
+                    self._alarm_fire_tasks.add(task)
+                    task.add_done_callback(self._alarm_fire_tasks.discard)
+            except Exception as e:
+                _log(f"[{self.bot_name}] alarm loop error: {e}")
+
+    async def _fire_alarm(self, alarm: AlarmEntry):
+        """Execute alarm: run LLM with prompt → send result to channel."""
+        self._in_flight_alarms.add(alarm.alarm_id)
+        # Mark run BEFORE execution to prevent duplicate fire on slow LLM calls
+        self._alarm_scheduler.mark_run(alarm.alarm_id, datetime.now(timezone.utc))
+        try:
+            channel = self.get_channel(alarm.channel_id)
+            if not channel:
+                _log(f"[{self.bot_name}] alarm {alarm.alarm_id}: channel {alarm.channel_id} not found")
+                return
+            if not self.executor:
+                return
+            # Sanitize prompt: strip any injected action blocks
+            safe_prompt = _ACTION_RE.sub("", alarm.prompt).strip()
+            response = await self.executor.execute(
+                safe_prompt,
+                system_prompt=self.persona,
+                model=MODEL_ALIASES[self._current_model],
+            )
+            # Security: strip action blocks from alarm-triggered responses
+            response = _ACTION_RE.sub("", response).strip()
+            prefix = f"[{self.bot_name}] 알람 ({alarm.alarm_id})\n"
+            for chunk in self._split_message(prefix + response):
+                await channel.send(chunk)
+        except Exception as e:
+            _log(f"[{self.bot_name}] alarm {alarm.alarm_id} failed: {e}")
+        finally:
+            self._in_flight_alarms.discard(alarm.alarm_id)
+
+    async def _handle_alarms(self, message: discord.Message):
+        """Handle !alarms command with subcommands: list, cancel <id>, cancel all."""
+        args = message.content.strip().split()
+        # !alarms cancel all
+        if len(args) >= 3 and args[1].lower() == "cancel" and args[2].lower() == "all":
+            alarms = self._alarm_scheduler.list_alarms()
+            if not alarms:
+                await message.channel.send(f"[{self.bot_name}] 취소할 알람 없음.")
+                return
+            count = 0
+            for a in alarms:
+                self._alarm_scheduler.remove_alarm(a.alarm_id)
+                count += 1
+            await message.channel.send(f"[{self.bot_name}] 전체 알람 {count}건 취소 완료.")
+            return
+
+        # !alarms cancel <alarm_id>
+        if len(args) >= 3 and args[1].lower() == "cancel":
+            alarm_id = args[2]
+            if self._alarm_scheduler.remove_alarm(alarm_id):
+                await message.channel.send(f"[{self.bot_name}] 알람 `{alarm_id}` 취소 완료.")
+            else:
+                await message.channel.send(f"[{self.bot_name}] 알람 `{alarm_id}`을(를) 찾을 수 없음.")
+            return
+
+        # !alarms (list)
+        alarms = self._alarm_scheduler.list_alarms()
+        if not alarms:
+            await message.channel.send(f"[{self.bot_name}] 등록된 알람 없음.")
+            return
+        lines = [f"**[{self.bot_name}] 알람 목록 ({len(alarms)}건)**"]
+        for a in alarms:
+            sched = self._format_schedule(a)
+            prompt_summary = a.prompt[:20] + "..." if len(a.prompt) > 20 else a.prompt
+            last = a.last_run[:16] if a.last_run else "미실행"
+            lines.append(f"- `{a.alarm_id}` | {sched} | {prompt_summary} | 마지막: {last}")
+        await message.channel.send("\n".join(lines))
+
+    @staticmethod
+    def _format_schedule(alarm: AlarmEntry) -> str:
+        """Format alarm schedule for display."""
+        if alarm.schedule_type == "daily":
+            return f"매일 {alarm.hour:02d}:{alarm.minute:02d}"
+        elif alarm.schedule_type == "weekday":
+            return f"평일 {alarm.hour:02d}:{alarm.minute:02d}"
+        elif alarm.schedule_type == "interval":
+            if alarm.interval_minutes >= 60 and alarm.interval_minutes % 60 == 0:
+                return f"{alarm.interval_minutes // 60}시간마다"
+            return f"{alarm.interval_minutes}분마다"
+        return alarm.schedule_type
+
+    async def _execute_set_alarm(self, body: str, message: discord.Message) -> str:
+        """Parse SET_ALARM body and register alarm."""
+        fields = self._parse_alarm_body(body)
+        schedule = fields.get("schedule", "").strip()
+        prompt = fields.get("prompt", "").strip()
+        tz = fields.get("timezone", "Asia/Seoul").strip()
+
+        if not schedule:
+            return f"[{self.bot_name}] 알람 등록 실패: schedule 필드 누락"
+        if not prompt:
+            return f"[{self.bot_name}] 알람 등록 실패: prompt 필드 누락"
+
+        try:
+            entry = self._alarm_scheduler.add_alarm(
+                schedule_str=schedule,
+                prompt=prompt,
+                channel_id=message.channel.id,
+                created_by=str(message.author),
+                tz=tz,
+            )
+            sched_display = self._format_schedule(entry)
+            return (
+                f"[{self.bot_name}] 알람 등록 완료\n"
+                f"- ID: `{entry.alarm_id}`\n"
+                f"- 스케줄: {sched_display}\n"
+                f"- 프롬프트: {entry.prompt[:50]}"
+            )
+        except ValueError as e:
+            return f"[{self.bot_name}] 알람 등록 실패: {e}"
+
+    async def _execute_cancel_alarm(self, body: str) -> str:
+        """Parse CANCEL_ALARM body and remove alarm."""
+        fields = self._parse_alarm_body(body)
+        alarm_id = fields.get("alarm_id", "").strip()
+        if not alarm_id:
+            # Try raw body as alarm ID
+            alarm_id = body.strip()
+        if not alarm_id:
+            return f"[{self.bot_name}] 알람 취소 실패: alarm_id 필드 누락"
+        if self._alarm_scheduler.remove_alarm(alarm_id):
+            return f"[{self.bot_name}] 알람 `{alarm_id}` 취소 완료"
+        return f"[{self.bot_name}] 알람 `{alarm_id}`을(를) 찾을 수 없음"
+
+    @staticmethod
+    def _parse_alarm_body(body: str) -> Dict[str, str]:
+        """Parse key: value lines from action body.
+
+        Lines without a colon are appended to the previous key's value,
+        supporting multiline prompt fields.
+        """
+        fields: Dict[str, str] = {}
+        last_key: Optional[str] = None
+        for line in body.strip().splitlines():
+            if ":" in line:
+                key, _, value = line.partition(":")
+                key = key.strip().lower()
+                fields[key] = value.strip()
+                last_key = key
+            elif last_key is not None:
+                # Continuation line — append to previous key
+                fields[last_key] += "\n" + line
+        return fields
 
     async def send_to_team(self, text: str):
         """Send a message to the first (primary) team channel."""
