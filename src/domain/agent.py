@@ -334,9 +334,6 @@ class AgentBrain:
         if not body:
             return f"[{self.bot_name}] 액션 본문이 비어있음. ({action_type})"
 
-        if action_type == "SEARCH_NEWS":
-            return await self._execute_search(body)
-
         client = self._clients.get(platform)
         if not client:
             return f"[{self.bot_name}] {platform} 클라이언트가 연결되지 않았음."
@@ -370,26 +367,6 @@ class AgentBrain:
         except Exception as e:
             _log(f"[{self.bot_name}] AUDIT: post error on {platform} — {e}")
             return f"[{self.bot_name}] {platform} 포스팅 에러: {e}"
-
-    async def _execute_search(self, query: str) -> str:
-        """Execute a news search immediately."""
-        client = self._clients.get("news")
-        if not client:
-            return f"[{self.bot_name}] news 클라이언트가 연결되지 않았음."
-        try:
-            result = await client.search(query)
-            if not result.success:
-                return f"[{self.bot_name}] 뉴스 검색 실패: {result.error}"
-            if not result.items:
-                return f"[{self.bot_name}] '{query}' 검색 결과 없음."
-            lines = [f"[{self.bot_name}] '{query}' 검색 결과:"]
-            for item in result.items[:5]:
-                lines.append(f"- {item.text[:200]}")
-                if item.url:
-                    lines.append(f"  {item.url}")
-            return "\n".join(lines)
-        except Exception as e:
-            return f"[{self.bot_name}] 뉴스 검색 에러: {e}"
 
     @staticmethod
     def _split_message(text: str, limit: int = 2000) -> List[str]:

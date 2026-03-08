@@ -307,12 +307,6 @@ class TestActionExecution:
         assert "메시지 컨텍스트 없음" in result
 
     @pytest.mark.asyncio
-    async def test_search_no_client(self):
-        brain, _, _ = _make_brain()
-        result = await brain.execute_action("SEARCH_NEWS", "query")
-        assert "연결되지 않았음" in result
-
-    @pytest.mark.asyncio
     async def test_instagram_empty_caption(self):
         brain, _, _ = _make_brain(clients={"instagram": object()})
         result = await brain.execute_action("POST_INSTAGRAM", "image_url: https://x.com/img.jpg")

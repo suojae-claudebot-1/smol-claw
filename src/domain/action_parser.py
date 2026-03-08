@@ -22,10 +22,8 @@ ACTION_RE = re.compile(
 # Map ACTION codes -> (platform, action_kind)
 ACTION_MAP: Dict[str, Tuple[str, str]] = {
     "POST_THREADS": ("threads", "post"),
-    "POST_LINKEDIN": ("linkedin", "post"),
     "POST_INSTAGRAM": ("instagram", "post"),
     "POST_X": ("x", "post"),
-    "SEARCH_NEWS": ("news", "search"),
     "SET_ALARM": ("alarm", "set"),
     "CANCEL_ALARM": ("alarm", "cancel"),
     "FIRE_BOT": ("hr", "fire"),
