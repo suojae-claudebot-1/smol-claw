@@ -34,16 +34,17 @@ def _make_bot(executor=None, tmp_dir=None) -> BaseMarketingBot:
     fake_user.id = BOT_USER_ID
     fake_user.name = "TestBot"
     fake_user.display_name = "TestBot"
-    fake_user.mentioned_in = MagicMock(return_value=False)
+    fake_user.mentioned_in = lambda msg: f"<@{BOT_USER_ID}>" in msg.content
     bot._connection = MagicMock()
     bot._connection.user = fake_user
     return bot
 
 
-def _make_message(content: str, channel_id: int, *, is_bot: bool = False) -> MagicMock:
+def _make_message(content: str, channel_id: int, *, is_bot: bool = False,
+                  mention_bot: bool = False) -> MagicMock:
     msg = MagicMock()
-    msg.content = content
-    msg.channel = MagicMock()
+    msg.content = f"<@{BOT_USER_ID}> {content}" if mention_bot else content
+    msg.channel = MagicMock(spec=[])
     msg.channel.id = channel_id
     msg.channel.send = AsyncMock()
     msg.channel.typing = MagicMock(return_value=AsyncMock(
@@ -155,7 +156,7 @@ class TestAlarmsCommand:
     async def test_alarms_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot = _make_bot(tmp_dir=tmp)
-            msg = _make_message("!alarms", OWN_CHANNEL)
+            msg = _make_message("!alarms", OWN_CHANNEL, mention_bot=True)
             await bot.on_message(msg)
             msg.channel.send.assert_awaited_once()
             assert "등록된 알람 없음" in msg.channel.send.call_args[0][0]
@@ -166,7 +167,7 @@ class TestAlarmsCommand:
             bot = _make_bot(tmp_dir=tmp)
             bot._alarm_scheduler.add_alarm("daily 09:00", "뉴스 요약해줘", 1, "u")
             bot._alarm_scheduler.add_alarm("every 2h", "가격 체크", 2, "u")
-            msg = _make_message("!alarms", OWN_CHANNEL)
+            msg = _make_message("!alarms", OWN_CHANNEL, mention_bot=True)
             await bot.on_message(msg)
             msg.channel.send.assert_awaited_once()
             text = msg.channel.send.call_args[0][0]
@@ -189,7 +190,7 @@ class TestAlarmsCommand:
         with tempfile.TemporaryDirectory() as tmp:
             bot = _make_bot(tmp_dir=tmp)
             entry = bot._alarm_scheduler.add_alarm("daily 09:00", "test", 1, "u")
-            msg = _make_message(f"!alarms cancel {entry.alarm_id}", OWN_CHANNEL)
+            msg = _make_message(f"!alarms cancel {entry.alarm_id}", OWN_CHANNEL, mention_bot=True)
             await bot.on_message(msg)
             msg.channel.send.assert_awaited_once()
             assert "취소 완료" in msg.channel.send.call_args[0][0]
@@ -200,7 +201,7 @@ class TestAlarmsCommand:
         """!alarms cancel <bad_id> should report not found."""
         with tempfile.TemporaryDirectory() as tmp:
             bot = _make_bot(tmp_dir=tmp)
-            msg = _make_message("!alarms cancel nonexist", OWN_CHANNEL)
+            msg = _make_message("!alarms cancel nonexist", OWN_CHANNEL, mention_bot=True)
             await bot.on_message(msg)
             msg.channel.send.assert_awaited_once()
             assert "찾을 수 없음" in msg.channel.send.call_args[0][0]
@@ -212,7 +213,7 @@ class TestAlarmsCommand:
             bot = _make_bot(tmp_dir=tmp)
             bot._alarm_scheduler.add_alarm("daily 09:00", "p1", 1, "u")
             bot._alarm_scheduler.add_alarm("every 2h", "p2", 2, "u")
-            msg = _make_message("!alarms cancel all", OWN_CHANNEL)
+            msg = _make_message("!alarms cancel all", OWN_CHANNEL, mention_bot=True)
             await bot.on_message(msg)
             msg.channel.send.assert_awaited_once()
             text = msg.channel.send.call_args[0][0]
@@ -225,7 +226,7 @@ class TestAlarmsCommand:
         """!alarms cancel all with no alarms."""
         with tempfile.TemporaryDirectory() as tmp:
             bot = _make_bot(tmp_dir=tmp)
-            msg = _make_message("!alarms cancel all", OWN_CHANNEL)
+            msg = _make_message("!alarms cancel all", OWN_CHANNEL, mention_bot=True)
             await bot.on_message(msg)
             msg.channel.send.assert_awaited_once()
             assert "취소할 알람 없음" in msg.channel.send.call_args[0][0]
