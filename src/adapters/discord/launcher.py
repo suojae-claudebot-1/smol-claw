@@ -115,7 +115,6 @@ def _build_bots():
 
     # Bot definitions: (token_key, bot_name, sns_filter, aliases)
     _BOT_DEFS = [
-        ("lead", "TeamLead", {"x"}, []),
         ("threads", "ThreadsBot", {"threads"}, []),
         ("linkedin", "LinkedInBot", {"linkedin"}, []),
         ("instagram", "InstagramBot", {"instagram"}, []),

@@ -32,7 +32,8 @@ def _make_bot(executor=None) -> BaseMarketingBot:
     fake_user.id = BOT_USER_ID
     fake_user.name = "TestBot"
     fake_user.display_name = "TestBot"
-    fake_user.mentioned_in = MagicMock(return_value=False)
+    # mentioned_in returns True when message content contains bot mention tag
+    fake_user.mentioned_in = lambda msg: f"<@{BOT_USER_ID}>" in msg.content
     bot._connection = MagicMock()
     bot._connection.user = fake_user
     return bot
@@ -40,10 +41,15 @@ def _make_bot(executor=None) -> BaseMarketingBot:
 
 def _make_message(content: str, channel_id: int, *, is_bot: bool = False,
                   mention_bot: bool = False) -> MagicMock:
-    """Create a fake discord.Message."""
+    """Create a fake discord.Message.
+
+    When mention_bot=True, the message content is prefixed with the bot's
+    mention tag and user.mentioned_in returns True — simulating a real
+    Discord @mention.
+    """
     msg = MagicMock()
-    msg.content = content
-    msg.channel = MagicMock()
+    msg.content = f"<@{BOT_USER_ID}> {content}" if mention_bot else content
+    msg.channel = MagicMock(spec=[])  # no spec attrs — prevents auto parent_id
     msg.channel.id = channel_id
     msg.channel.send = AsyncMock()
     msg.channel.typing = MagicMock(return_value=AsyncMock(
@@ -52,6 +58,7 @@ def _make_message(content: str, channel_id: int, *, is_bot: bool = False,
     msg.author = MagicMock()
     msg.author.bot = is_bot
     msg.author.id = 1234 if not is_bot else 5678
+    msg.role_mentions = []
     return msg
 
 
@@ -65,7 +72,7 @@ async def test_clear_current_channel_only():
     bot._channel_history[OWN_CHANNEL] = [{"role": "user", "text": "hi"}]
     bot._channel_history[TEAM_CHANNEL] = [{"role": "user", "text": "hello"}]
 
-    msg = _make_message("!clear", OWN_CHANNEL)
+    msg = _make_message("!clear", OWN_CHANNEL, mention_bot=True)
     await bot.on_message(msg)
 
     # Own channel cleared
@@ -82,7 +89,7 @@ async def test_clear_all_channels():
     bot._channel_history[OWN_CHANNEL] = [{"role": "user", "text": "hi"}]
     bot._channel_history[TEAM_CHANNEL] = [{"role": "user", "text": "hello"}]
 
-    msg = _make_message("!clear all", OWN_CHANNEL)
+    msg = _make_message("!clear all", OWN_CHANNEL, mention_bot=True)
     await bot.on_message(msg)
 
     assert len(bot._channel_history) == 0
@@ -106,7 +113,7 @@ async def test_cancel_active_task():
     fake_task.cancel = MagicMock()
     bot._active_tasks[OWN_CHANNEL] = fake_task
 
-    msg = _make_message("!cancel", OWN_CHANNEL)
+    msg = _make_message("!cancel", OWN_CHANNEL, mention_bot=True)
     await bot.on_message(msg)
 
     fake_task.cancel.assert_called_once()
@@ -118,7 +125,7 @@ async def test_cancel_active_task():
 async def test_cancel_no_active_task_own_channel():
     """!cancel in 1:1 channel with no active task → inform user."""
     bot = _make_bot()
-    msg = _make_message("!cancel", OWN_CHANNEL)
+    msg = _make_message("!cancel", OWN_CHANNEL, mention_bot=True)
     await bot.on_message(msg)
 
     msg.channel.send.assert_awaited_once()
@@ -142,7 +149,7 @@ async def test_cancel_no_active_task_team_channel_silent():
 @pytest.mark.asyncio
 async def test_help_in_own_channel():
     bot = _make_bot()
-    msg = _make_message("!help", OWN_CHANNEL)
+    msg = _make_message("!help", OWN_CHANNEL, mention_bot=True)
     await bot.on_message(msg)
 
     msg.channel.send.assert_awaited_once()
@@ -186,8 +193,8 @@ async def test_clear_team_channel_without_mention_silent():
 
 @pytest.mark.asyncio
 async def test_help_team_channel_without_mention_ignored():
-    """!help in team channel without mention → non-TeamLead bots stay silent."""
-    bot = _make_bot()  # bot_name="TestBot", not TeamLead
+    """!help in team channel without mention → bots stay silent."""
+    bot = _make_bot()
     msg = _make_message("!help", TEAM_CHANNEL)
     await bot.on_message(msg)
 
@@ -235,7 +242,7 @@ async def test_cancel_sets_suppress_flag():
     fake_task.cancel = MagicMock()
     bot._active_tasks[OWN_CHANNEL] = fake_task
 
-    msg = _make_message("!cancel", OWN_CHANNEL)
+    msg = _make_message("!cancel", OWN_CHANNEL, mention_bot=True)
     await bot.on_message(msg)
 
     assert bot._suppress_bot_replies is True
@@ -257,7 +264,7 @@ async def test_suppress_cleared_on_human_message():
     bot = _make_bot(executor=MagicMock())
     bot._suppress_bot_replies = True
 
-    msg = _make_message("안녕", OWN_CHANNEL)
+    msg = _make_message("안녕", OWN_CHANNEL, mention_bot=True)
     # Mock _respond to avoid full LLM execution
     bot._respond = AsyncMock()
     await bot.on_message(msg)

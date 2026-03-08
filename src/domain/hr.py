@@ -30,16 +30,12 @@ BOT_NAME_ALIASES: Dict[str, str] = {
     "radar": "news",
     "researcher": "news",
     "researcherbot": "news",
-    "teamlead": "lead",
-    "captain": "lead",
-    "lead": "lead",
-    "teamleadbot": "lead",
     "hr": "hr",
     "hrbot": "hr",
 }
 
 # Protected bots that cannot be fired
-PROTECTED_KEYS = frozenset({"lead", "hr"})
+PROTECTED_KEYS = frozenset({"hr"})
 
 # History thresholds for proactive management
 HISTORY_WARN_THRESHOLD = 10
@@ -69,8 +65,7 @@ async def fire_bot(
         return bot_or_msg
 
     if key in PROTECTED_KEYS:
-        label = "Captain(TeamLead)" if key == "lead" else "HR"
-        return f"[{caller}] {label}은(는) 보호 대상이므로 해고 불가함."
+        return f"[{caller}] HR은(는) 보호 대상이므로 해고 불가함."
 
     if not bot_or_msg.active:
         return f"[{caller}] {bot_or_msg.bot_name}은(는) 이미 비활성 상태임. 추가 조치 불요함."

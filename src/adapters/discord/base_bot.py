@@ -239,15 +239,17 @@ class BaseMarketingBot(discord.Client):
                 content_stripped = content_stripped.replace(f"<@{self.user.id}>", "").strip()
             cmd = content_stripped.split()[0].lower() if content_stripped else ""
 
+            # In threads, all commands work without mention.
+            # In channels (1:1 or team), require mention (except broadcast commands).
             if cmd == "!cancel":
                 args = content_stripped.split()
                 is_cancel_all = len(args) >= 2 and args[1].lower() == "all"
 
-                if is_own_channel or in_thread:
+                if in_thread:
                     await self._handle_cancel(message)
                     return
 
-                if is_team_channel:
+                if is_own_channel or is_team_channel:
                     if is_cancel_all or is_mentioned:
                         await self._handle_cancel(message)
                     return
@@ -255,28 +257,32 @@ class BaseMarketingBot(discord.Client):
                 return
 
             if cmd == "!alarms":
-                if is_own_channel or in_thread or (is_team_channel and is_mentioned):
+                if in_thread or is_mentioned:
                     await self._handle_alarms(message)
                     return
 
             if cmd == "!persona":
-                if is_own_channel or in_thread or (is_team_channel and is_mentioned):
+                if in_thread or is_mentioned:
                     await self._handle_persona_command(message, content_stripped)
                     return
 
             if cmd == "!help":
-                if is_own_channel or in_thread or (is_team_channel and (is_mentioned or self.bot_name == "TeamLead")):
+                if in_thread or is_mentioned:
                     await self._handle_help(message)
                     return
 
             if cmd == "!clear":
-                if is_own_channel or in_thread or (is_team_channel and (is_mentioned or self.bot_name == "TeamLead")):
+                if in_thread or is_mentioned:
                     await self._handle_clear(message)
                     return
-                # Team channel without mention — silently clear (TeamLead sends confirmation)
+                # Team channel without mention — silently clear
                 if is_team_channel:
                     await self._handle_clear_silent(message)
                     return
+
+        # Outside threads, only process messages that mention this bot
+        if not in_thread and not is_mentioned:
+            return
 
         if message.author.bot:
             if self._suppress_bot_replies:
@@ -298,12 +304,12 @@ class BaseMarketingBot(discord.Client):
         if is_team_channel:
             self._bot_chain_count[parent_id] = 0
 
-        if is_own_channel or in_thread:
-            # 1:1 channel or inside thread — always respond
-            thread = await self._resolve_thread(message)
+        if in_thread:
+            # Inside thread — respond without mention
+            thread = message.channel
             await self._respond(message, thread=thread)
-        elif is_team_channel and is_mentioned:
-            # Team room — only when mentioned, respond in a thread
+        elif is_mentioned:
+            # Channel (1:1 or team) — mentioned, create thread and respond
             thread = await self._resolve_thread(message)
             await self._respond(message, thread=thread)
 
@@ -687,7 +693,7 @@ class BaseMarketingBot(discord.Client):
         `!cancel`     — cancel this bot's task for the current channel.
         `!cancel all` — cancel ALL bots' active tasks across all channels.
         """
-        args = message.content.strip().split()
+        args = self._strip_mention(message.content).split()
         cancel_all = len(args) >= 2 and args[1].lower() == "all"
 
         if cancel_all:
@@ -737,9 +743,15 @@ class BaseMarketingBot(discord.Client):
                 cancelled += 1
         return cancelled
 
+    def _strip_mention(self, text: str) -> str:
+        """Remove this bot's mention tag from text."""
+        if self.user:
+            text = text.replace(f"<@{self.user.id}>", "")
+        return text.strip()
+
     async def _handle_clear(self, message: discord.Message):
         """Clear conversation history. `!clear` = current channel, `!clear all` = all."""
-        args = message.content.strip().split()
+        args = self._strip_mention(message.content).split()
         if len(args) >= 2 and args[1].lower() == "all":
             self._channel_history.clear()
             await message.channel.send(f"[{self.bot_name}] 전체 대화 기록 초기화됨.")
@@ -751,7 +763,7 @@ class BaseMarketingBot(discord.Client):
 
     async def _handle_clear_silent(self, message: discord.Message):
         """Clear history without sending a message (for team channel noise prevention)."""
-        args = message.content.strip().split()
+        args = self._strip_mention(message.content).split()
         if len(args) >= 2 and args[1].lower() == "all":
             self._channel_history.clear()
         else:
@@ -840,7 +852,7 @@ class BaseMarketingBot(discord.Client):
 
     async def _handle_alarms(self, message: discord.Message):
         """Handle !alarms command with subcommands: list, cancel <id>, cancel all."""
-        args = message.content.strip().split()
+        args = self._strip_mention(message.content).split()
         # !alarms cancel all
         if len(args) >= 3 and args[1].lower() == "cancel" and args[2].lower() == "all":
             alarms = self._alarm_scheduler.list_alarms()
