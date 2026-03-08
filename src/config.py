@@ -82,7 +82,6 @@ CONFIG = {
 DISCORD_CHANNELS = {
     "team": int(os.getenv("DISCORD_TEAM_CHANNEL_ID", "0")),
     "test": int(os.getenv("DISCORD_TEST_CHANNEL_ID", "0")),
-    "lead": int(os.getenv("DISCORD_LEAD_CHANNEL_ID", "0")),
     "threads": int(os.getenv("DISCORD_THREADS_CHANNEL_ID", "0")),
     "linkedin": int(os.getenv("DISCORD_LINKEDIN_CHANNEL_ID", "0")),
     "instagram": int(os.getenv("DISCORD_INSTAGRAM_CHANNEL_ID", "0")),
@@ -92,7 +91,6 @@ DISCORD_CHANNELS = {
 
 # Discord multi-bot tokens
 DISCORD_TOKENS = {
-    "lead": os.getenv("DISCORD_LEAD_TOKEN", ""),
     "threads": os.getenv("DISCORD_THREADS_TOKEN", ""),
     "linkedin": os.getenv("DISCORD_LINKEDIN_TOKEN", ""),
     "instagram": os.getenv("DISCORD_INSTAGRAM_TOKEN", ""),

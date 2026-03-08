@@ -193,8 +193,8 @@ async def test_clear_team_channel_without_mention_silent():
 
 @pytest.mark.asyncio
 async def test_help_team_channel_without_mention_ignored():
-    """!help in team channel without mention → non-TeamLead bots stay silent."""
-    bot = _make_bot()  # bot_name="TestBot", not TeamLead
+    """!help in team channel without mention → bots stay silent."""
+    bot = _make_bot()
     msg = _make_message("!help", TEAM_CHANNEL)
     await bot.on_message(msg)
 

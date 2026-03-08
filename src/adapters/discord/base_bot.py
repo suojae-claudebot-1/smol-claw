@@ -245,7 +245,7 @@ class BaseMarketingBot(discord.Client):
                 args = content_stripped.split()
                 is_cancel_all = len(args) >= 2 and args[1].lower() == "all"
 
-                if is_own_channel or in_thread:
+                if in_thread:
                     await self._handle_cancel(message)
                     return
 
@@ -257,25 +257,25 @@ class BaseMarketingBot(discord.Client):
                 return
 
             if cmd == "!alarms":
-                if is_own_channel or in_thread or (is_team_channel and is_mentioned):
+                if in_thread or is_mentioned:
                     await self._handle_alarms(message)
                     return
 
             if cmd == "!persona":
-                if is_own_channel or in_thread or (is_team_channel and is_mentioned):
+                if in_thread or is_mentioned:
                     await self._handle_persona_command(message, content_stripped)
                     return
 
             if cmd == "!help":
-                if is_own_channel or in_thread or (is_team_channel and (is_mentioned or self.bot_name == "TeamLead")):
+                if in_thread or is_mentioned:
                     await self._handle_help(message)
                     return
 
             if cmd == "!clear":
-                if is_own_channel or in_thread or (is_team_channel and (is_mentioned or self.bot_name == "TeamLead")):
+                if in_thread or is_mentioned:
                     await self._handle_clear(message)
                     return
-                # Team channel without mention — silently clear (TeamLead sends confirmation)
+                # Team channel without mention — silently clear
                 if is_team_channel:
                     await self._handle_clear_silent(message)
                     return
@@ -304,12 +304,12 @@ class BaseMarketingBot(discord.Client):
         if is_team_channel:
             self._bot_chain_count[parent_id] = 0
 
-        if is_own_channel or in_thread:
-            # 1:1 channel or inside thread — always respond
-            thread = await self._resolve_thread(message)
+        if in_thread:
+            # Inside thread — respond without mention
+            thread = message.channel
             await self._respond(message, thread=thread)
-        elif is_team_channel and is_mentioned:
-            # Team room — only when mentioned, respond in a thread
+        elif is_mentioned:
+            # Channel (1:1 or team) — mentioned, create thread and respond
             thread = await self._resolve_thread(message)
             await self._respond(message, thread=thread)
 
