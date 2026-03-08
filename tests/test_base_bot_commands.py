@@ -192,13 +192,13 @@ async def test_clear_team_channel_without_mention_silent():
 
 
 @pytest.mark.asyncio
-async def test_help_team_channel_without_mention_responds():
-    """!help in team channel without mention → responds (team channel is free)."""
+async def test_help_team_channel_without_mention_ignored():
+    """!help in team channel without mention → ignored (mention required)."""
     bot = _make_bot()
     msg = _make_message("!help", TEAM_CHANNEL)
     await bot.on_message(msg)
 
-    msg.channel.send.assert_awaited_once()
+    msg.channel.send.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

@@ -292,13 +292,19 @@ class BaseMarketingBot(discord.Client):
 
         # Gate: decide whether to respond
         if in_thread:
-            # In threads, only respond freely if parent is own channel.
-            # Team channel threads require mention (prevents bot invasion).
-            if not is_own_channel and not is_mentioned:
+            # Thread owner bot → free response (no mention needed)
+            # Own channel threads → free response (existing behavior)
+            # Guest bots → require @mention
+            is_thread_owner = (
+                self.user
+                and hasattr(message.channel, 'owner_id')
+                and message.channel.owner_id == self.user.id
+            )
+            if not is_own_channel and not is_thread_owner and not is_mentioned:
                 return
         else:
-            # Outside threads: need team channel or explicit mention
-            if not is_team_channel and not is_mentioned:
+            # Outside threads: need explicit mention
+            if not is_mentioned:
                 return
 
         if message.author.bot:
@@ -325,8 +331,8 @@ class BaseMarketingBot(discord.Client):
             # Inside thread — respond without mention
             thread = message.channel
             await self._respond(message, thread=thread)
-        elif is_team_channel or is_mentioned:
-            # Team channel (free) or 1:1 channel (mentioned) — create thread and respond
+        elif is_mentioned:
+            # Mentioned in channel — create thread and respond
             thread = await self._resolve_thread(message)
             await self._respond(message, thread=thread)
 
