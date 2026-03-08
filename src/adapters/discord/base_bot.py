@@ -355,11 +355,17 @@ class BaseMarketingBot(discord.Client):
                 actions = actions[:_MAX_ACTIONS_PER_MESSAGE]
 
             # Execute actions with lock (CR #5: concurrency control)
+            action_results = []
             async with self._action_lock:
                 for action_type, action_body in actions:
                     result = await self._execute_action(action_type, action_body.strip(), message=message)
                     if result:
                         await message.channel.send(result)
+                        action_results.append(result)
+            # Save action results to history so LLM can reference them
+            # (e.g., alarm IDs needed for CANCEL_ALARM)
+            if action_results:
+                history.append({"role": "assistant", "text": "\n".join(action_results)[:200]})
 
         except Exception as e:
             _log(f"[{self.bot_name}] error: {e}")
