@@ -245,7 +245,7 @@ class BaseMarketingBot(discord.Client):
                 args = content_stripped.split()
                 is_cancel_all = len(args) >= 2 and args[1].lower() == "all"
 
-                if in_thread:
+                if is_own_channel or in_thread:
                     await self._handle_cancel(message)
                     return
 
@@ -257,22 +257,22 @@ class BaseMarketingBot(discord.Client):
                 return
 
             if cmd == "!alarms":
-                if in_thread or is_mentioned:
+                if is_own_channel or in_thread or (is_team_channel and is_mentioned):
                     await self._handle_alarms(message)
                     return
 
             if cmd == "!persona":
-                if in_thread or is_mentioned:
+                if is_own_channel or in_thread or (is_team_channel and is_mentioned):
                     await self._handle_persona_command(message, content_stripped)
                     return
 
             if cmd == "!help":
-                if in_thread or is_mentioned or (is_team_channel and self.bot_name == "TeamLead"):
+                if is_own_channel or in_thread or (is_team_channel and (is_mentioned or self.bot_name == "TeamLead")):
                     await self._handle_help(message)
                     return
 
             if cmd == "!clear":
-                if in_thread or is_mentioned or (is_team_channel and self.bot_name == "TeamLead"):
+                if is_own_channel or in_thread or (is_team_channel and (is_mentioned or self.bot_name == "TeamLead")):
                     await self._handle_clear(message)
                     return
                 # Team channel without mention — silently clear (TeamLead sends confirmation)
@@ -288,8 +288,8 @@ class BaseMarketingBot(discord.Client):
             if self._suppress_bot_replies:
                 _log(f"[{self.bot_name}] suppressed (post-cancel cooldown)")
                 return
-            # Bot messages: respond if mentioned (already guaranteed by guard above)
-            if is_team_channel or is_own_channel:
+            # Bot messages: only respond if mentioned in team channel
+            if is_team_channel and is_mentioned:
                 chain = self._bot_chain_count.get(parent_id, 0)
                 if chain >= self._max_bot_chain:
                     _log(f"[{self.bot_name}] bot chain limit reached ({chain}/{self._max_bot_chain}), ignoring")
@@ -304,12 +304,12 @@ class BaseMarketingBot(discord.Client):
         if is_team_channel:
             self._bot_chain_count[parent_id] = 0
 
-        if in_thread:
-            # Inside thread — respond without mention
-            thread = message.channel
+        if is_own_channel or in_thread:
+            # 1:1 channel or inside thread — always respond
+            thread = await self._resolve_thread(message)
             await self._respond(message, thread=thread)
-        elif is_mentioned:
-            # Channel (1:1 or team) — mentioned, create thread and respond
+        elif is_team_channel and is_mentioned:
+            # Team room — only when mentioned, respond in a thread
             thread = await self._resolve_thread(message)
             await self._respond(message, thread=thread)
 
