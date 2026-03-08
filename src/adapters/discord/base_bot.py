@@ -290,9 +290,16 @@ class BaseMarketingBot(discord.Client):
                     await self._handle_clear_silent(message)
                     return
 
-        # Outside threads/team, only process messages that mention this bot
-        if not in_thread and not is_team_channel and not is_mentioned:
-            return
+        # Gate: decide whether to respond
+        if in_thread:
+            # In threads, only respond freely if parent is own channel.
+            # Team channel threads require mention (prevents bot invasion).
+            if not is_own_channel and not is_mentioned:
+                return
+        else:
+            # Outside threads: need team channel or explicit mention
+            if not is_team_channel and not is_mentioned:
+                return
 
         if message.author.bot:
             if self._suppress_bot_replies:
