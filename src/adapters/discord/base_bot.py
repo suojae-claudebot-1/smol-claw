@@ -170,10 +170,26 @@ class BaseMarketingBot(discord.Client):
             _log(f"[{self.bot_name}] thread creation failed, falling back to channel: {e}")
             return message.channel
 
+    # HRBot has a fixed persona — no onboarding needed
+    _HR_PERSONA = (
+        "너는 HR 매니저 봇이야. 팀의 에이전트(봇)를 관리하는 역할임.\n"
+        "현재 팀: ThreadsBot, InstagramBot, HRBot(너, 보호 대상)\n"
+        "사용자가 너를 호출하면 먼저 [ACTION: STATUS_REPORT][/ACTION]로 현황을 보여주고, "
+        "누구를 해고(세션 종료 + 기억 초기화)하거나 재채용할지 물어봐.\n"
+        "해고: [ACTION: FIRE_BOT]봇이름[/ACTION]\n"
+        "재채용: [ACTION: HIRE_BOT]봇이름[/ACTION]\n"
+        "현황: [ACTION: STATUS_REPORT][/ACTION]\n"
+        "보호 대상(HR)은 해고 불가. 항상 간결하게 한국어로 응답해."
+    )
+
     async def on_ready(self):
         _log(f"[{self.bot_name}] logged in as {self.user}")
+        # HRBot gets fixed persona — skip onboarding
+        if self.bot_name == "HRBot" and self.persona is None:
+            self.persona = self._HR_PERSONA
+            _log(f"[{self.bot_name}] fixed HR persona applied")
         # Load persona from DB
-        if self.persona_store:
+        elif self.persona_store:
             saved = self.persona_store.get(self.bot_name)
             if saved:
                 self.persona = saved
@@ -187,6 +203,14 @@ class BaseMarketingBot(discord.Client):
         """대화 히스토리 전체 초기화."""
         self._channel_history.clear()
         _log(f"[{self.bot_name}] conversation history cleared")
+
+    def clear_persona(self):
+        """페르소나 초기화 — DB에서 삭제하고 메모리에서 제거."""
+        if self.persona_store:
+            self.persona_store.delete(self.bot_name)
+        self.persona = None
+        self._onboarding_active = False
+        _log(f"[{self.bot_name}] persona cleared")
 
     # -- Public properties for HR / domain access --
 
@@ -266,7 +290,7 @@ class BaseMarketingBot(discord.Client):
                     await self._handle_persona_command(message, content_stripped)
                     return
 
-            if cmd == "!help":
+            if cmd in ("!help", "!"):
                 if in_thread or is_mentioned:
                     await self._handle_help(message)
                     return
@@ -280,8 +304,8 @@ class BaseMarketingBot(discord.Client):
                     await self._handle_clear_silent(message)
                     return
 
-        # Outside threads, only process messages that mention this bot
-        if not in_thread and not is_mentioned:
+        # Outside threads/team, only process messages that mention this bot
+        if not in_thread and not is_team_channel and not is_mentioned:
             return
 
         if message.author.bot:
@@ -308,8 +332,8 @@ class BaseMarketingBot(discord.Client):
             # Inside thread — respond without mention
             thread = message.channel
             await self._respond(message, thread=thread)
-        elif is_mentioned:
-            # Channel (1:1 or team) — mentioned, create thread and respond
+        elif is_team_channel or is_mentioned:
+            # Team channel (free) or 1:1 channel (mentioned) — create thread and respond
             thread = await self._resolve_thread(message)
             await self._respond(message, thread=thread)
 
@@ -596,11 +620,15 @@ class BaseMarketingBot(discord.Client):
                 return f"[{self.bot_name}] bot_registry가 없어서 HR 액션 실행 불가함."
             from src.domain.hr import fire_bot, hire_bot, status_report
             if action_type == "FIRE_BOT":
-                return await fire_bot(body.strip(), registry, self.bot_name)
+                result = await fire_bot(body.strip(), registry, self.bot_name)
             elif action_type == "HIRE_BOT":
-                return await hire_bot(body.strip(), registry, self.bot_name)
+                result = await hire_bot(body.strip(), registry, self.bot_name)
             else:
                 return status_report(registry, self.bot_name)
+            # Broadcast fire/hire to all bot channels
+            if action_type in ("FIRE_BOT", "HIRE_BOT"):
+                await self._broadcast_hr(result, registry)
+            return result
 
         mapping = _ACTION_MAP.get(action_type)
         if not mapping:
@@ -619,10 +647,6 @@ class BaseMarketingBot(discord.Client):
         # CR #3: Reject empty action body (after alarm actions which have own validation)
         if not body:
             return f"[{self.bot_name}] 액션 본문이 비어있음. ({action_type})"
-
-        # SEARCH_NEWS — execute immediately, no approval needed
-        if action_type == "SEARCH_NEWS":
-            return await self._execute_search(body)
 
         # POST actions — check approval setting
         client = self._clients.get(platform)
@@ -666,26 +690,6 @@ class BaseMarketingBot(discord.Client):
         except Exception as e:
             _log(f"[{self.bot_name}] AUDIT: post error on {platform} — {e}")
             return f"[{self.bot_name}] {platform} 포스팅 에러: {e}"
-
-    async def _execute_search(self, query: str) -> str:
-        """Execute a news search immediately."""
-        client = self._clients.get("news")
-        if not client:
-            return f"[{self.bot_name}] news 클라이언트가 연결되지 않았음."
-        try:
-            result = await client.search(query)
-            if not result.success:
-                return f"[{self.bot_name}] 뉴스 검색 실패: {result.error}"
-            if not result.items:
-                return f"[{self.bot_name}] '{query}' 검색 결과 없음."
-            lines = [f"[{self.bot_name}] '{query}' 검색 결과:"]
-            for item in result.items[:5]:
-                lines.append(f"- {item.text[:200]}")
-                if item.url:
-                    lines.append(f"  {item.url}")
-            return "\n".join(lines)
-        except Exception as e:
-            return f"[{self.bot_name}] 뉴스 검색 에러: {e}"
 
     async def _handle_cancel(self, message: discord.Message):
         """Cancel active LLM tasks.
@@ -786,7 +790,7 @@ class BaseMarketingBot(discord.Client):
             "`!persona set <설명>` — 즉시 페르소나 변경",
             "`!clear` — 현재 채널 대화 기록 초기화",
             "`!clear all` — 전체 채널 대화 기록 초기화",
-            "`!help` — 이 명령어 목록 표시",
+            "`!` or `!help` — 이 명령어 목록 표시",
         ]
         await message.channel.send("\n".join(lines))
 
@@ -945,6 +949,31 @@ class BaseMarketingBot(discord.Client):
     def _parse_alarm_body(body: str) -> Dict[str, str]:
         """Parse key: value lines from action body."""
         return parse_alarm_body(body)
+
+    async def _broadcast_hr(self, text: str, registry: Dict[str, "BaseMarketingBot"]):
+        """Broadcast an HR action result to all bot channels and the team channel."""
+        sent_ids: set = set()
+        # Send to team channel
+        team_ch = self.get_channel(self._primary_team_channel_id)
+        if team_ch:
+            try:
+                await team_ch.send(text)
+                sent_ids.add(team_ch.id)
+            except Exception as e:
+                _log(f"[{self.bot_name}] broadcast to team failed: {e}")
+        # Send to each bot's own channel
+        for bot in registry.values():
+            ch_id = bot.own_channel_id
+            if ch_id in sent_ids or ch_id == 0:
+                continue
+            ch = self.get_channel(ch_id)
+            if not ch:
+                continue
+            try:
+                await ch.send(text)
+                sent_ids.add(ch_id)
+            except Exception as e:
+                _log(f"[{self.bot_name}] broadcast to {bot.bot_name} channel failed: {e}")
 
     async def send_to_team(self, text: str):
         """Send a message to the first (primary) team channel."""

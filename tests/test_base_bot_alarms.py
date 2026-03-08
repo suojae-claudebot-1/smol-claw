@@ -176,13 +176,13 @@ class TestAlarmsCommand:
             assert "2시간마다" in text
 
     @pytest.mark.asyncio
-    async def test_alarms_team_channel_requires_mention(self):
-        """!alarms in team channel without mention → no response."""
+    async def test_alarms_team_channel_without_mention_responds(self):
+        """!alarms in team channel without mention → responds (team is free)."""
         with tempfile.TemporaryDirectory() as tmp:
             bot = _make_bot(tmp_dir=tmp)
             msg = _make_message("!alarms", TEAM_CHANNEL)
             await bot.on_message(msg)
-            msg.channel.send.assert_not_awaited()
+            msg.channel.send.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_alarms_cancel_by_id(self):
