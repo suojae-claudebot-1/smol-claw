@@ -22,11 +22,11 @@ def _make_bot(executor=None, tmp_dir=None) -> BaseMarketingBot:
     """Create a BaseMarketingBot with alarm scheduler using temp storage."""
     bot = BaseMarketingBot(
         bot_name="TestBot",
-        persona="You are a test bot.",
         own_channel_id=OWN_CHANNEL,
         team_channel_id=TEAM_CHANNEL,
         executor=executor,
     )
+    bot.persona = "You are a test bot."
     if tmp_dir:
         from src.domain.alarm import AlarmScheduler
         bot._alarm_scheduler = AlarmScheduler(bot_name="TestBot", storage_dir=tmp_dir)

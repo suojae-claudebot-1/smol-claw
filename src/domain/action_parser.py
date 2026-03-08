@@ -28,6 +28,9 @@ ACTION_MAP: Dict[str, Tuple[str, str]] = {
     "SEARCH_NEWS": ("news", "search"),
     "SET_ALARM": ("alarm", "set"),
     "CANCEL_ALARM": ("alarm", "cancel"),
+    "FIRE_BOT": ("hr", "fire"),
+    "HIRE_BOT": ("hr", "hire"),
+    "STATUS_REPORT": ("hr", "status"),
 }
 
 # Max actions per single LLM response (spam prevention)
