@@ -6,12 +6,7 @@ from typing import Dict
 
 from src.config import DISCORD_CHANNELS, DISCORD_TOKENS
 from src.adapters.discord.base_bot import BaseMarketingBot
-from src.adapters.discord.team_lead_bot import TeamLeadBot
-from src.adapters.discord.threads_bot import ThreadsBot
-from src.adapters.discord.linkedin_bot import LinkedInBot
-from src.adapters.discord.instagram_bot import InstagramBot
-from src.adapters.discord.news_bot import ResearcherBot
-from src.adapters.discord.hr_bot import HRBot
+from src.adapters.storage.persona_store import PersonaStore
 
 
 def _log(msg: str):
@@ -116,28 +111,33 @@ def _build_bots():
     test_ch = DISCORD_CHANNELS.get("test", 0)
     extra = [test_ch] if test_ch else []
     sns = _create_sns_clients()
+    persona_store = PersonaStore()
 
-    # Bot definitions: (Class, token_key, sns_filter)
+    # Bot definitions: (token_key, bot_name, sns_filter, aliases)
     _BOT_DEFS = [
-        (TeamLeadBot, "lead", {"x"}),
-        (ThreadsBot, "threads", {"threads"}),
-        (LinkedInBot, "linkedin", {"linkedin"}),
-        (InstagramBot, "instagram", {"instagram"}),
-        (ResearcherBot, "news", {"news"}),
+        ("lead", "TeamLead", {"x"}, []),
+        ("threads", "ThreadsBot", {"threads"}, []),
+        ("linkedin", "LinkedInBot", {"linkedin"}, []),
+        ("instagram", "InstagramBot", {"instagram"}, []),
+        ("news", "ResearcherBot", {"news"}, ["NewsBot"]),
+        ("hr", "HRBot", set(), ["HR"]),
     ]
 
     bots = []
-    for BotClass, key, allowed_sns in _BOT_DEFS:
+    for key, bot_name, allowed_sns, aliases in _BOT_DEFS:
         token = DISCORD_TOKENS[key]
         if not token:
-            _log(f"Skipping {BotClass.__name__} — DISCORD_{key.upper()}_TOKEN not set")
+            _log(f"Skipping {bot_name} — DISCORD_{key.upper()}_TOKEN not set")
             continue
-        bot = BotClass(
+        bot = BaseMarketingBot(
+            bot_name=bot_name,
             own_channel_id=DISCORD_CHANNELS[key],
             team_channel_id=team_ch,
             extra_team_channels=extra,
+            persona_store=persona_store,
             executor=_create_executor(),
             clients={k: v for k, v in sns.items() if k in allowed_sns},
+            aliases=aliases,
         )
         _BOT_REGISTRY[key] = bot
         bots.append((bot, token))
@@ -145,21 +145,6 @@ def _build_bots():
     # Inject bot_registry into all bots (HR authority + !cancel all cross-bot)
     for bot_instance, _ in bots:
         bot_instance.bot_registry = _BOT_REGISTRY
-
-    # HR — created last, receives bot_registry reference
-    token = DISCORD_TOKENS["hr"]
-    if token:
-        bot = HRBot(
-            own_channel_id=DISCORD_CHANNELS["hr"],
-            team_channel_id=team_ch,
-            extra_team_channels=extra,
-            executor=_create_executor(),
-            bot_registry=_BOT_REGISTRY,
-        )
-        _BOT_REGISTRY["hr"] = bot
-        bots.append((bot, token))
-    else:
-        _log("Skipping HRBot — DISCORD_HR_TOKEN not set")
 
     return bots
 

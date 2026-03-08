@@ -1,17 +1,5 @@
-"""LinkedIn bot — LinkedIn platform content creation and posting."""
+"""Shim — LinkedInBot is now BaseMarketingBot with dynamic persona."""
 
-from src.adapters.discord.base_bot import BaseMarketingBot
-from src.domain.personas import LINKEDIN_PERSONA
+from src.adapters.discord.base_bot import BaseMarketingBot as LinkedInBot
 
-
-class LinkedInBot(BaseMarketingBot):
-    """LinkedIn platform specialist bot.
-
-    Responsibilities:
-    - LinkedIn content planning and posting
-    - B2B marketing, thought leadership
-    - Industry insights and professional networking content
-    """
-
-    def __init__(self, **kwargs):
-        super().__init__(bot_name="LinkedInBot", persona=LINKEDIN_PERSONA, **kwargs)
+__all__ = ["LinkedInBot"]

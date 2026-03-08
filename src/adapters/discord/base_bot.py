@@ -1,6 +1,8 @@
 """Base class for all marketing bots.
 
 Discord adapter layer — delegates domain logic to src.domain modules.
+Dynamic persona system: bots ask users "who am I?" on first interaction,
+store personas in SQLite, and allow runtime changes via !persona commands.
 """
 
 import asyncio
@@ -31,6 +33,28 @@ def _log(msg: str):
     print(msg, file=sys.stderr)
 
 
+_PERSONA_GEN_PROMPT = """아래 설명을 바탕으로 에이전트 페르소나를 생성해줘.
+
+유저 설명: "{user_description}"
+
+다음 구조로 작성:
+1. 역할 한 줄 정의
+2. 핵심 철학 (3-5개)
+3. 구체적 역할/책임
+4. 성격 특성
+5. 말투 규칙
+6. 예시 대화 (3-5개)
+
+한국어로 작성하되, 음슴체(~함, ~임, ~됨) 스타일 유지.
+"""
+
+_ONBOARDING_MSG = (
+    "안녕! 나는 아직 어떤 에이전트인지 모르는 상태임.\n"
+    "내가 어떤 역할을 하면 좋을지 알려줘!\n"
+    "예: '너는 마케팅 전략가야', '너는 코드 리뷰어야' 등"
+)
+
+
 class BaseMarketingBot(discord.Client):
     """Base Discord bot for the multi-agent marketing system.
 
@@ -38,16 +62,18 @@ class BaseMarketingBot(discord.Client):
     - 1:1 channel: responds to all user messages
     - #team-room: responds only when @mentioned (by user or other bots)
     - LLM action blocks: [ACTION:TYPE]...[/ACTION] → SNS execution
+    - Dynamic persona: onboarding + !persona commands + SQLite persistence
     """
 
-    _MAX_CHANNELS = 20  # LRU eviction threshold for channel history
+    _MAX_CONVERSATIONS = 50  # LRU eviction threshold for conversation history
+    _THREAD_AUTO_ARCHIVE = 60  # auto-archive threads after 60 minutes
 
     def __init__(
         self,
         bot_name: str,
-        persona: str,
         own_channel_id: int,
         team_channel_id: int,
+        persona_store=None,
         executor: Optional[AIExecutor] = None,
         clients: Optional[Dict[str, Any]] = None,
         extra_team_channels: Optional[List[int]] = None,
@@ -59,7 +85,9 @@ class BaseMarketingBot(discord.Client):
 
         self.bot_name = bot_name
         self._aliases: List[str] = aliases or []
-        self.persona = persona
+        self.persona: Optional[str] = None  # loaded from DB on on_ready
+        self.persona_store = persona_store
+        self._onboarding_active: bool = False
         self.own_channel_id = own_channel_id
         self._primary_team_channel_id = team_channel_id
         self._team_channel_ids = {team_channel_id}
@@ -103,8 +131,55 @@ class BaseMarketingBot(discord.Client):
         content_lower = content.lower()
         return any(f"@{name.lower()}" in content_lower for name in names)
 
+    @staticmethod
+    def _get_parent_channel_id(message: discord.Message) -> int:
+        """Return the parent channel ID if inside a thread, else the channel ID."""
+        ch = message.channel
+        if isinstance(ch, discord.Thread):
+            return ch.parent_id
+        return ch.id
+
+    @staticmethod
+    def _make_thread_name(message: discord.Message) -> str:
+        """Build a thread name from the message content (max 80 chars)."""
+        text = message.content.strip()
+        # Remove bot mention markup
+        text = re.sub(r"<@!?\d+>", "", text).strip()
+        if not text:
+            text = "대화"
+        if len(text) > 80:
+            text = text[:77] + "..."
+        return text
+
+    async def _resolve_thread(self, message: discord.Message):
+        """Return the thread to reply in.
+
+        If the message is already in a thread, return that thread.
+        Otherwise create a new thread from the message.
+        Falls back to the channel on failure.
+        """
+        if isinstance(message.channel, discord.Thread):
+            return message.channel
+        try:
+            thread = await message.create_thread(
+                name=self._make_thread_name(message),
+                auto_archive_duration=self._THREAD_AUTO_ARCHIVE,
+            )
+            return thread
+        except Exception as e:
+            _log(f"[{self.bot_name}] thread creation failed, falling back to channel: {e}")
+            return message.channel
+
     async def on_ready(self):
         _log(f"[{self.bot_name}] logged in as {self.user}")
+        # Load persona from DB
+        if self.persona_store:
+            saved = self.persona_store.get(self.bot_name)
+            if saved:
+                self.persona = saved
+                _log(f"[{self.bot_name}] persona loaded from DB ({len(saved)} chars)")
+            else:
+                _log(f"[{self.bot_name}] no persona in DB — will onboard on first message")
         if not self._alarm_loop_task or self._alarm_loop_task.done():
             self._alarm_loop_task = asyncio.create_task(self._alarm_loop())
 
@@ -146,8 +221,10 @@ class BaseMarketingBot(discord.Client):
         if not self.user or message.author == self.user:
             return
 
-        is_team_channel = message.channel.id in self._team_channel_ids
-        is_own_channel = message.channel.id == self.own_channel_id
+        parent_id = self._get_parent_channel_id(message)
+        is_team_channel = parent_id in self._team_channel_ids
+        is_own_channel = parent_id == self.own_channel_id
+        in_thread = isinstance(message.channel, discord.Thread)
         is_mentioned = (
             self.user.mentioned_in(message)
             or self._is_role_mentioned(message)
@@ -166,35 +243,34 @@ class BaseMarketingBot(discord.Client):
                 args = content_stripped.split()
                 is_cancel_all = len(args) >= 2 and args[1].lower() == "all"
 
-                if is_own_channel:
-                    # 1:1 channel — always cancel own task
+                if is_own_channel or in_thread:
                     await self._handle_cancel(message)
                     return
 
                 if is_team_channel:
                     if is_cancel_all or is_mentioned:
-                        # !cancel all → all bots cancel
-                        # !cancel @BotName → only mentioned bot cancels
                         await self._handle_cancel(message)
                     return
 
                 return
 
             if cmd == "!alarms":
-                if is_own_channel or (is_team_channel and is_mentioned):
+                if is_own_channel or in_thread or (is_team_channel and is_mentioned):
                     await self._handle_alarms(message)
                     return
 
+            if cmd == "!persona":
+                if is_own_channel or in_thread or (is_team_channel and is_mentioned):
+                    await self._handle_persona_command(message, content_stripped)
+                    return
+
             if cmd == "!help":
-                # 1:1 channel — always handle
-                # Team channel — TeamLead responds as representative to avoid 6-bot noise
-                if is_own_channel or (is_team_channel and (is_mentioned or self.bot_name == "TeamLead")):
+                if is_own_channel or in_thread or (is_team_channel and (is_mentioned or self.bot_name == "TeamLead")):
                     await self._handle_help(message)
                     return
 
             if cmd == "!clear":
-                # 1:1 channel — always handle
-                if is_own_channel or (is_team_channel and (is_mentioned or self.bot_name == "TeamLead")):
+                if is_own_channel or in_thread or (is_team_channel and (is_mentioned or self.bot_name == "TeamLead")):
                     await self._handle_clear(message)
                     return
                 # Team channel without mention — silently clear (TeamLead sends confirmation)
@@ -208,28 +284,156 @@ class BaseMarketingBot(discord.Client):
                 return
             # Bot messages: only respond if mentioned in team channel
             if is_team_channel and is_mentioned:
-                chain = self._bot_chain_count.get(message.channel.id, 0)
+                chain = self._bot_chain_count.get(parent_id, 0)
                 if chain >= self._max_bot_chain:
                     _log(f"[{self.bot_name}] bot chain limit reached ({chain}/{self._max_bot_chain}), ignoring")
                     return
-                self._bot_chain_count[message.channel.id] = chain + 1
-                await self._respond(message)
+                self._bot_chain_count[parent_id] = chain + 1
+                thread = await self._resolve_thread(message)
+                await self._respond(message, thread=thread)
             return
 
         # User messages — reset bot chain counter and cancel suppression
         self._suppress_bot_replies = False
         if is_team_channel:
-            self._bot_chain_count[message.channel.id] = 0
+            self._bot_chain_count[parent_id] = 0
 
-        if is_own_channel:
-            # 1:1 channel — always respond
-            await self._respond(message)
+        if is_own_channel or in_thread:
+            # 1:1 channel or inside thread — always respond
+            thread = await self._resolve_thread(message)
+            await self._respond(message, thread=thread)
         elif is_team_channel and is_mentioned:
-            # Team room — only when mentioned
-            await self._respond(message)
+            # Team room — only when mentioned, respond in a thread
+            thread = await self._resolve_thread(message)
+            await self._respond(message, thread=thread)
 
-    async def _respond(self, message: discord.Message):
+    # -- Onboarding & Persona --
+
+    async def _onboarding(self, message: discord.Message, reply_target=None):
+        """Handle onboarding flow: ask user for persona description, generate via LLM."""
+        target = reply_target or message.channel
+        if self._onboarding_active:
+            # User is replying with their persona description
+            user_desc = message.content.strip()
+            if self.user:
+                user_desc = user_desc.replace(f"<@{self.user.id}>", "").strip()
+            user_desc = _ACTION_RE.sub("", user_desc).strip()
+
+            if not user_desc:
+                await target.send(f"[{self.bot_name}] 빈 설명은 안 됨. 역할을 설명해줘!")
+                return
+
+            await target.send(f"[{self.bot_name}] 페르소나 생성 중...")
+
+            persona = await self._generate_persona(user_desc)
+            self.persona = persona
+            self._onboarding_active = False
+
+            # Save to DB
+            if self.persona_store:
+                self.persona_store.set(
+                    self.bot_name, persona,
+                    created_by=str(message.author),
+                )
+
+            await target.send(
+                f"[{self.bot_name}] 페르소나 설정 완료! 이제부터 새 역할로 활동할게.\n"
+                f"(`!persona` 로 확인, `!persona reset` 으로 재설정 가능)"
+            )
+            return
+
+        # First contact — send onboarding message
+        self._onboarding_active = True
+        await target.send(f"[{self.bot_name}] {_ONBOARDING_MSG}")
+
+    async def _generate_persona(self, user_description: str) -> str:
+        """Use LLM to generate a structured persona from user description."""
+        if not self.executor:
+            return f"너는 {user_description}임."
+
+        prompt = _PERSONA_GEN_PROMPT.format(user_description=user_description)
+        try:
+            persona = await self.executor.execute(
+                prompt,
+                system_prompt="너는 에이전트 페르소나 설계 전문가임. 요청에 맞게 구조화된 페르소나를 작성해.",
+                model=MODEL_ALIASES[self._current_model],
+            )
+            return persona
+        except Exception as e:
+            _log(f"[{self.bot_name}] persona generation failed: {e}")
+            return f"너는 {user_description}임."
+
+    async def _handle_persona_command(self, message: discord.Message, content: str):
+        """Handle !persona commands: show, reset, set."""
+        args = content.split(maxsplit=2)
+
+        if len(args) == 1:
+            # !persona — show current
+            if self.persona:
+                truncated = self.persona[:1500] + "..." if len(self.persona) > 1500 else self.persona
+                await message.channel.send(
+                    f"**[{self.bot_name}] 현재 페르소나:**\n{truncated}"
+                )
+            else:
+                await message.channel.send(
+                    f"[{self.bot_name}] 페르소나 미설정 상태임. 메시지를 보내면 온보딩이 시작됨."
+                )
+            return
+
+        subcmd = args[1].lower()
+
+        if subcmd == "reset":
+            # !persona reset — clear persona, restart onboarding
+            self.persona = None
+            self._onboarding_active = False
+            if self.persona_store:
+                self.persona_store.delete(self.bot_name)
+            await message.channel.send(
+                f"[{self.bot_name}] 페르소나 초기화됨. 다음 메시지에서 새로 온보딩 시작함."
+            )
+            return
+
+        if subcmd == "set":
+            # !persona set <description> — generate and set immediately
+            if len(args) < 3 or not args[2].strip():
+                await message.channel.send(
+                    f"[{self.bot_name}] 사용법: `!persona set <역할 설명>`"
+                )
+                return
+
+            desc = args[2].strip()
+            await message.channel.send(f"[{self.bot_name}] 페르소나 생성 중...")
+
+            persona = await self._generate_persona(desc)
+            self.persona = persona
+            self._onboarding_active = False
+
+            if self.persona_store:
+                self.persona_store.set(
+                    self.bot_name, persona,
+                    created_by=str(message.author),
+                )
+
+            await message.channel.send(
+                f"[{self.bot_name}] 페르소나 설정 완료! (`!persona` 로 확인 가능)"
+            )
+            return
+
+        # Unknown subcommand
+        await message.channel.send(
+            f"[{self.bot_name}] 사용법: `!persona` / `!persona reset` / `!persona set <설명>`"
+        )
+
+    async def _respond(self, message: discord.Message, *, thread=None):
         """Generate and send a response, executing any action blocks."""
+        reply_target = thread or message.channel
+
+        # Check if persona is set — if not, trigger onboarding
+        if self.persona is None:
+            if not message.author.bot:
+                await self._onboarding(message, reply_target=reply_target)
+            return
+
         user_message = message.content
         # Remove bot mention from message text for cleaner processing
         if self.user:
@@ -241,24 +445,26 @@ class BaseMarketingBot(discord.Client):
         _log(f"[{self.bot_name}] responding to: {user_message[:80]}")
 
         if not self.executor:
-            await message.channel.send(f"[{self.bot_name}] executor가 설정되지 않았음.")
+            await reply_target.send(f"[{self.bot_name}] executor가 설정되지 않았음.")
             return
 
         try:
-            channel_id = message.channel.id
-            is_team_channel = channel_id in self._team_channel_ids
-            is_own_channel = channel_id == self.own_channel_id
+            parent_id = self._get_parent_channel_id(message)
+            is_team_channel = parent_id in self._team_channel_ids
+            is_own_channel = parent_id == self.own_channel_id
+
+            conv_id = reply_target.id
 
             # Build context from conversation history (LRU eviction)
-            if channel_id in self._channel_history:
-                self._channel_history.move_to_end(channel_id)
+            if conv_id in self._channel_history:
+                self._channel_history.move_to_end(conv_id)
             else:
-                self._channel_history[channel_id] = []
-                # Evict oldest channel if over capacity
-                while len(self._channel_history) > self._MAX_CHANNELS:
+                self._channel_history[conv_id] = []
+                # Evict oldest conversation if over capacity
+                while len(self._channel_history) > self._MAX_CONVERSATIONS:
                     evicted_id, _ = self._channel_history.popitem(last=False)
-                    _log(f"[{self.bot_name}] evicted channel history: {evicted_id}")
-            history = self._channel_history[channel_id]
+                    _log(f"[{self.bot_name}] evicted conversation history: {evicted_id}")
+            history = self._channel_history[conv_id]
 
             parts = [self.persona]
 
@@ -277,7 +483,6 @@ class BaseMarketingBot(discord.Client):
             parts.append("Continue naturally.")
             context = "\n\n".join(parts)
 
-            channel_id_for_task = message.channel.id
             task = asyncio.create_task(
                 self.executor.execute(
                     user_message,
@@ -285,7 +490,7 @@ class BaseMarketingBot(discord.Client):
                     model=MODEL_ALIASES[self._current_model],
                 )
             )
-            self._active_tasks[channel_id_for_task] = task
+            self._active_tasks[conv_id] = task
 
             async def _progress_reporter(ch, interval=120):
                 """Send periodic progress updates while the LLM task runs."""
@@ -299,25 +504,25 @@ class BaseMarketingBot(discord.Client):
                     )
 
             progress_task = asyncio.create_task(
-                _progress_reporter(message.channel)
+                _progress_reporter(reply_target)
             )
             try:
-                async with message.channel.typing():
+                async with reply_target.typing():
                     response = await task
             except asyncio.CancelledError:
-                await message.channel.send(f"[{self.bot_name}] 응답이 취소됨.")
+                await reply_target.send(f"[{self.bot_name}] 응답이 취소됨.")
                 return
             finally:
                 progress_task.cancel()
                 # Only remove if this task is still the registered one
-                if self._active_tasks.get(channel_id_for_task) is task:
-                    del self._active_tasks[channel_id_for_task]
+                if self._active_tasks.get(conv_id) is task:
+                    del self._active_tasks[conv_id]
 
             # Save to history
             history.append({"role": "user", "text": user_message})
             history.append({"role": "assistant", "text": response[:200]})
             if len(history) > self._max_history * 2:
-                self._channel_history[channel_id] = history[-self._max_history * 2:]
+                self._channel_history[conv_id] = history[-self._max_history * 2:]
 
             # If cancel happened during LLM execution, suppress bot-triggered response
             if self._suppress_bot_replies and message.author.bot:
@@ -331,7 +536,7 @@ class BaseMarketingBot(discord.Client):
             # Send plain text first
             if plain_text:
                 for chunk in self._split_message(plain_text):
-                    await message.channel.send(chunk)
+                    await reply_target.send(chunk)
 
             # Actions allowed in team channel and bot's own 1:1 channel
             # Alarm actions (SET_ALARM, CANCEL_ALARM) are allowed everywhere
@@ -340,7 +545,7 @@ class BaseMarketingBot(discord.Client):
                 alarm_actions = [(t, b) for t, b in actions if t in _ALARM_ACTIONS]
                 non_alarm_actions = [(t, b) for t, b in actions if t not in _ALARM_ACTIONS]
                 if non_alarm_actions:
-                    await message.channel.send(
+                    await reply_target.send(
                         f"[{self.bot_name}] 액션은 팀 채널 또는 1:1 채널에서만 실행 가능함."
                     )
                 actions = alarm_actions
@@ -349,7 +554,7 @@ class BaseMarketingBot(discord.Client):
 
             # CR #2: Limit actions per message to prevent spam
             if len(actions) > _MAX_ACTIONS_PER_MESSAGE:
-                await message.channel.send(
+                await reply_target.send(
                     f"[{self.bot_name}] 메시지당 최대 {_MAX_ACTIONS_PER_MESSAGE}건 액션만 실행됨."
                 )
                 actions = actions[:_MAX_ACTIONS_PER_MESSAGE]
@@ -360,7 +565,7 @@ class BaseMarketingBot(discord.Client):
                 for action_type, action_body in actions:
                     result = await self._execute_action(action_type, action_body.strip(), message=message)
                     if result:
-                        await message.channel.send(result)
+                        await reply_target.send(result)
                         action_results.append(result)
             # Save action results to history so LLM can reference them
             # (e.g., alarm IDs needed for CANCEL_ALARM)
@@ -369,7 +574,7 @@ class BaseMarketingBot(discord.Client):
 
         except Exception as e:
             _log(f"[{self.bot_name}] error: {e}")
-            await message.channel.send(f"[{self.bot_name}] 에러 발생: {e}")
+            await reply_target.send(f"[{self.bot_name}] 에러 발생: {e}")
 
     @staticmethod
     def _parse_instagram_body(body: str):
@@ -378,6 +583,19 @@ class BaseMarketingBot(discord.Client):
 
     async def _execute_action(self, action_type: str, body: str, message: discord.Message = None) -> str:
         """Execute an action block. Respects the approval system for POST actions."""
+        # HR actions (fire/hire/status) — handled by any bot with bot_registry
+        if action_type in ("FIRE_BOT", "HIRE_BOT", "STATUS_REPORT"):
+            registry = getattr(self, "bot_registry", None) or {}
+            if not registry:
+                return f"[{self.bot_name}] bot_registry가 없어서 HR 액션 실행 불가함."
+            from src.domain.hr import fire_bot, hire_bot, status_report
+            if action_type == "FIRE_BOT":
+                return await fire_bot(body.strip(), registry, self.bot_name)
+            elif action_type == "HIRE_BOT":
+                return await hire_bot(body.strip(), registry, self.bot_name)
+            else:
+                return status_report(registry, self.bot_name)
+
         mapping = _ACTION_MAP.get(action_type)
         if not mapping:
             return f"[{self.bot_name}] 알 수 없는 액션: {action_type}"
@@ -473,7 +691,7 @@ class BaseMarketingBot(discord.Client):
         cancel_all = len(args) >= 2 and args[1].lower() == "all"
 
         if cancel_all:
-            is_team = message.channel.id in self._team_channel_ids
+            is_team = self._get_parent_channel_id(message) in self._team_channel_ids
             if is_team:
                 # Team channel: every bot receives !cancel all independently
                 # → each bot cancels its own tasks only (avoids duplicate cancellation)
@@ -497,8 +715,8 @@ class BaseMarketingBot(discord.Client):
                     await message.channel.send(f"[{self.bot_name}] 취소할 작업이 없음.")
             return
 
-        channel_id = message.channel.id
-        task = self._active_tasks.get(channel_id)
+        conv_id = message.channel.id
+        task = self._active_tasks.get(conv_id)
         if task and not task.done():
             task.cancel()
             self._suppress_bot_replies = True
@@ -506,7 +724,8 @@ class BaseMarketingBot(discord.Client):
         else:
             # In team channels, stay silent to avoid 5-bot noise.
             # In 1:1 channels, inform the user.
-            if channel_id == self.own_channel_id:
+            parent_id = self._get_parent_channel_id(message)
+            if parent_id == self.own_channel_id:
                 await message.channel.send(f"[{self.bot_name}] 취소할 작업이 없음.")
 
     def _cancel_own_tasks(self) -> int:
@@ -550,6 +769,9 @@ class BaseMarketingBot(discord.Client):
             "`!alarms` — 등록된 알람 목록 조회",
             "`!alarms cancel <ID>` — 특정 알람 취소",
             "`!alarms cancel all` — 전체 알람 취소",
+            "`!persona` — 현재 페르소나 확인",
+            "`!persona reset` — 페르소나 초기화 (재온보딩)",
+            "`!persona set <설명>` — 즉시 페르소나 변경",
             "`!clear` — 현재 채널 대화 기록 초기화",
             "`!clear all` — 전체 채널 대화 기록 초기화",
             "`!help` — 이 명령어 목록 표시",
@@ -593,9 +815,11 @@ class BaseMarketingBot(discord.Client):
                 return
             # Sanitize prompt: strip any injected action blocks
             safe_prompt = _ACTION_RE.sub("", alarm.prompt).strip()
+            # Use persona if set, otherwise use a minimal fallback
+            system_prompt = self.persona or f"너는 {self.bot_name}임."
             response = await self.executor.execute(
                 safe_prompt,
-                system_prompt=self.persona,
+                system_prompt=system_prompt,
                 model=MODEL_ALIASES[self._current_model],
             )
             _log(f"[{self.bot_name}] alarm {alarm.alarm_id}: executor returned {len(response)} chars")

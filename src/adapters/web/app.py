@@ -9,13 +9,14 @@ from pydantic import BaseModel
 from src.config import CONFIG, AI_PROVIDER
 from src.adapters.llm.executor import create_executor
 from src.adapters.web.sns_routes import sns_router
-from src.domain.persona import BOT_PERSONA
+from src.adapters.storage.persona_store import PersonaStore
 
 app = FastAPI(title="Smol Claw Marketing Server")
 app.include_router(sns_router)
 
-# Global executor
+# Global executor & persona store
 executor = create_executor(AI_PROVIDER)
+_persona_store = PersonaStore()
 
 
 # Request/Response models
@@ -38,7 +39,8 @@ class StatusResponse(BaseModel):
 async def ask(request: AskRequest):
     """Manual question endpoint"""
     try:
-        response = await executor.execute(request.message, system_prompt=BOT_PERSONA)
+        persona = _persona_store.get("WebAPI") or "너는 도움이 되는 AI 어시스턴트임."
+        response = await executor.execute(request.message, system_prompt=persona)
         return AskResponse(response=response)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -22,11 +22,11 @@ def _make_bot(executor=None) -> BaseMarketingBot:
     """Create a BaseMarketingBot with minimal config and a fake self.user."""
     bot = BaseMarketingBot(
         bot_name="TestBot",
-        persona="You are a test bot.",
         own_channel_id=OWN_CHANNEL,
         team_channel_id=TEAM_CHANNEL,
         executor=executor,
     )
+    bot.persona = "You are a test bot."
     # Fake self.user — discord.Client exposes user via _connection.user
     fake_user = MagicMock()
     fake_user.id = BOT_USER_ID
@@ -292,11 +292,11 @@ def test_alias_text_mention():
     """Bot with aliases should respond to @OldName text mentions."""
     bot = BaseMarketingBot(
         bot_name="ResearcherBot",
-        persona="test",
         own_channel_id=OWN_CHANNEL,
         team_channel_id=TEAM_CHANNEL,
         aliases=["NewsBot"],
     )
+    bot.persona = "test"
     fake_user = MagicMock()
     fake_user.id = BOT_USER_ID
     fake_user.name = "ResearcherBot"

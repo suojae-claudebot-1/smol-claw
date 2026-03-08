@@ -169,6 +169,7 @@ class TestActionMap:
         expected_keys = {
             "POST_THREADS", "POST_LINKEDIN", "POST_INSTAGRAM", "POST_X",
             "SEARCH_NEWS", "SET_ALARM", "CANCEL_ALARM",
+            "FIRE_BOT", "HIRE_BOT", "STATUS_REPORT",
         }
         assert set(ACTION_MAP.keys()) == expected_keys
 
